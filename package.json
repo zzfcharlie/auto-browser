@@ -1,0 +1,48 @@
+{
+  "name": "auto-browser",
+  "version": "1.0.0",
+  "description": "CDP-driven browser automation framework — build a page map once, execute scripts forever. Zero screenshots, zero per-call LLM cost.",
+  "type": "module",
+  "main": "api/index.mjs",
+  "bin": {
+    "auto-browser": "bin/cli.mjs"
+  },
+  "files": [
+    "api/",
+    "bin/",
+    "core/",
+    "cache/manager.mjs",
+    "adapters/",
+    "detector/",
+    "mcp/",
+    "SKILL.md"
+  ],
+  "scripts": {
+    "start": "node bin/cli.mjs",
+    "map": "node bin/cli.mjs map",
+    "mcp": "node mcp/server.mjs"
+  },
+  "keywords": [
+    "browser-automation",
+    "cdp",
+    "puppeteer",
+    "web-scraping",
+    "page-map",
+    "mcp",
+    "element-plus",
+    "ant-design",
+    "mui"
+  ],
+  "author": "zhifeng.z",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhifeng-z/auto-browser.git"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
