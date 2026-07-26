@@ -31,8 +31,14 @@ export class AutoBrowser {
   }
 
   async disconnect() {
-    if (this.browser && this.browser.isConnected()) {
-      await this.browser.disconnect();
+    if (this.browser) {
+      try {
+        if (typeof this.browser.isConnected === 'function' && this.browser.isConnected()) {
+          await this.browser.disconnect();
+        }
+      } catch (e) {
+        // ignore disconnect errors
+      }
       this.browser = null;
       this.page = null;
     }

@@ -65,6 +65,42 @@ export async function buildMap(page, { includeHidden = false } = {}) {
 
 // --- Generate element map structure for known website ---
 
+
+// --- Inject visual overlay with numbered boxes ---
+
+export async function injectOverlay(page, elements) {
+  await page.evaluate((els) => {
+    const overlay = document.createElement('div');
+    overlay.id = '__ab_overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2147483647;';
+    document.body.appendChild(overlay);
+
+    const colors = ['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD','#98FB98','#FFD700'];
+
+    els.forEach((el, i) => {
+      if (!el.rect) return;
+      const color = colors[i % colors.length];
+      const { x, y, w, h } = el.rect;
+
+      const box = document.createElement('div');
+      box.style.cssText = `position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;border:2px solid ${color};box-sizing:border-box;`;
+      overlay.appendChild(box);
+
+      const label = document.createElement('div');
+      label.textContent = `${i + 1}`;
+      label.style.cssText = `position:absolute;left:${x - 1}px;top:${y - 18}px;background:${color};color:#fff;font-size:11px;padding:1px 4px;border-radius:2px;font-family:monospace;white-space:nowrap;`;
+      overlay.appendChild(label);
+    });
+  }, elements);
+}
+
+export async function removeOverlay(page) {
+  await page.evaluate(() => {
+    const el = document.getElementById('__ab_overlay');
+    if (el) el.remove();
+  });
+}
+
 export async function generateScript(page, siteName, { outputDir = './scripts' } = {}) {
   const map = await buildMap(page);
 

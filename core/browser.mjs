@@ -31,8 +31,14 @@ export async function connect({ url = CDP_URL, hostname, viewport = VIEWPORT } =
 }
 
 export async function disconnect() {
-  if (_browser && _browser.isConnected()) {
-    await _browser.disconnect();
+  if (_browser) {
+    try {
+      if (typeof _browser.isConnected === 'function' && _browser.isConnected()) {
+        await _browser.disconnect();
+      }
+    } catch (e) {
+      // ignore disconnect errors
+    }
     _browser = null;
   }
 }

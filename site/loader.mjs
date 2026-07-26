@@ -24,7 +24,10 @@ export async function loadBuiltInAdapters() {
   const files = fs.readdirSync(registryDir).filter(f => f.endsWith('.mjs'));
   for (const file of files) {
     try {
-      const mod = await import(path.join(registryDir, file));
+      const filePath = path.join(registryDir, file);
+      // Use file:// URL for Windows compatibility
+      const fileUrl = new URL('file://' + (process.platform === 'win32' ? '/' : '') + filePath.replace(/\\/g, '/')).href;
+      const mod = await import(fileUrl);
       const name = path.basename(file, '.mjs');
       builtInAdapters[name] = mod.default || mod;
     } catch (e) {
