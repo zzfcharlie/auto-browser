@@ -2,6 +2,7 @@ import puppeteer from 'puppeteer-core';
 import { buildMap, injectOverlay, removeOverlay } from '../core/map.mjs';
 import { detectFramework } from '../detector/index.mjs';
 import { CacheManager } from '../cache/manager.mjs';
+import * as network from '../core/network.mjs';
 
 const CDP_URL = 'http://127.0.0.1:9222';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -85,6 +86,27 @@ export class AutoBrowser {
     this.cache.saveMap(site, pageName, this.page.url(), map);
     
     return { cached: false, map, framework };
+  }
+
+  // Network capture
+  async startNetworkCapture(options = {}) {
+    return network.startCapture(this.page, options);
+  }
+
+  async stopNetworkCapture() {
+    return network.stopCapture(this.page);
+  }
+
+  async getAllResponseBodies() {
+    return network.getAllResponseBodies(this.page);
+  }
+
+  getCapturedRequests() {
+    return network.getCapturedRequests();
+  }
+
+  async captureNavigation(url, options = {}) {
+    return network.captureNavigation(this.page, url, options);
   }
 
   // 获取当前页面

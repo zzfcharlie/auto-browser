@@ -1,10 +1,9 @@
 ---
 name: auto-browser
-description: >
-  CDP-driven browser automation framework. Build a page map once, execute
-  scripts forever — no screenshots, no per-call LLM understanding.
-  Use when automating multi-step browser tasks on known websites where
-  token efficiency matters.
+description: >-
+  CDP-driven browser automation framework. Build page maps, run site
+  adapters (eval+fetch), capture network traffic. No API keys needed.
+  Your real browser is the API. 0 tokens on repeat operations.
 ---
 
 # Auto-Browser
@@ -19,159 +18,106 @@ description: >
                                                 ↑ token 浪费在这里
 ```
 
-Auto-Browser：
+Auto-Browser v2.0 三模式：
 ```
-第一次：建图（LLM 分析页面 → 输出元素地图 + 脚本）
-后续：  执行（直接 CDP 跑脚本，零 LLM 参与）
+模式1: 建图缓存 — 建图一次，零 token 重复执行
+模式2: Site Adapter — 直接 eval + fetch，零 token 拿数据
+模式3: Network Capture — CDP 抓包，零 token 反向工程 API
+```
+
+## CLI 命令速查
+
+### 建图
+```bash
+auto-browser map https://example.com           # 建图（7层检测）
+auto-browser map https://example.com -v        # 带可视化 overlay
+auto-browser cache list                         # 看缓存
+auto-browser cache clear                        # 清缓存
+```
+
+### Site Adapter（取数据，零 token）
+```bash
+auto-browser site list                                     # 列出所有适配器
+auto-browser site github-repo owner=zzfcharlie repo=auto-browser  # GitHub 仓库信息
+auto-browser site github-search query="browser automation"        # GitHub 搜索
+auto-browser site arxiv-search query=transformer                  # arXiv 论文
+auto-browser site hackernews count=20                             # HackerNews 热榜
+auto-browser site wikipedia title=Python                          # Wikipedia 摘要
+auto-browser site zhihu                                            # 知乎热榜
+auto-browser site baidu query="auto-browser"                      # 百度搜索
+```
+
+### Network 抓包
+```bash
+auto-browser network nav https://example.com --with-body --json   # 一键抓所有请求
+auto-browser network start                                          # 开抓
+auto-browser open https://example.com                               # 导航
+auto-browser network stop --json                                    # 看结果
+```
+
+### Daemon 后台
+```bash
+auto-browser daemon start                           # 启动后台
+auto-browser daemon status                          # 查看状态
+curl -X POST http://127.0.0.1:19824/command \       # HTTP API
+  -d '{"method":"site/run","params":{"adapter":"hackernews"}}'
+```
+
+### 浏览器交互
+```bash
+auto-browser open https://example.com      # 导航
+auto-browser snap                           # 快照页面元素
+auto-browser detect                         # 检测 UI 框架
+auto-browser click 500 300                  # 坐标点击
+auto-browser click .btn-submit              # 选择器点击
+auto-browser fill #username "hello"          # 填输入框
+auto-browser eval "document.title"           # 执行 JS
+auto-browser screenshot                      # 截图
 ```
 
 ## 架构
 
 ```
-auto-browser/
-├── core/
-│   ├── browser.mjs     CDP 连接管理
-│   ├── dom.mjs          DOM 查询 + 元素过滤
-│   ├── interact.mjs     点击 / 输入 / 下拉 / 滚动
-│   ├── form.mjs         表单填充 / 读取
-│   └── map.mjs          页面建图：7 层元素检测
-├── detector/
-│   └── index.mjs        UI 框架自动检测
-├── adapters/
-│   ├── element-plus.mjs Element Plus 适配器
-│   ├── ant-design.mjs   Ant Design 适配器
-│   ├── mui.mjs          Material UI 适配器
-│   └── generic.mjs      通用 HTML 适配器
-├── cache/
-│   ├── manager.mjs      缓存管理
-│   ├── maps/            页面地图 JSON
-│   └── scripts/         操作脚本 .mjs
-├── api/
-│   └── index.mjs        AutoBrowser 主类
-├── mcp/
-│   └── server.mjs       MCP Server
-└── bin/
-    └── cli.mjs          CLI 工具
+auto-browser v2.0/
+├── core/           CDP 连接、DOM、交互、表单、建图、抓包
+├── detector/       UI 框架检测（Element Plus / AntD / MUI）
+├── adapters/       框架适配器（表单操作）
+├── site/           Site 适配器（GitHub / arXiv / HackerNews / 知乎...）
+├── daemon/         后台 HTTP 服务
+├── cache/          缓存管理（maps + scripts）
+├── api/            AutoBrowser 主类
+├── mcp/            MCP Server
+└── bin/            CLI 入口
 ```
 
-## 工作流
+## 与 bb-browser 对比吸收
 
-### Phase 1: 建图（一次性，消耗 token）
-```
-目标网站 → buildMap() 分析页面
-         → 输出 cache/maps/<site>/<page>.json（元素选择器 + 布局）
-         → 生成 cache/scripts/<site>/<action>.mjs（操作脚本）
-```
-
-### Phase 2: 执行（零 token，纯 CDP）
-```
-node cache/scripts/<site>/<action>.mjs
-→ 直接 CDP 操作，不需要 LLM
-```
-
-## 7 层元素检测
-
-```
-Layer 1 (standard): button, a, input, textarea, select, [role="button"], ...
-Layer 2 (aria):      [aria-label]
-Layer 3 (icon-btn):  cursor:pointer + SVG 子元素 → 捕获图标按钮
-Layer 4 (clickable): cursor:pointer 叶子元素
-Layer 5 (onclick):   el.onclick !== null
-Layer 6 (data-attr): [data-toggle], [data-target], [data-action]
-Layer 7 (tabindex):  [tabindex] ≥ 0
-```
-
-## UI 框架检测
-
-自动检测网站使用的 UI 组件库：
-- Element Plus（`.el-*` 类名）
-- Ant Design（`.ant-*` 类名）
-- MUI（`.Mui*` 类名）
-
-## CLI 使用
-
-```bash
-# 建图
-auto-browser map https://example.com
-
-# 带可视化 overlay
-auto-browser map https://example.com --visualize
-
-# 检测 UI 框架
-auto-browser detect https://element-plus.org
-
-# 缓存管理
-auto-browser cache list
-auto-browser cache clear
-```
-
-## API 使用
-
-```javascript
-import { AutoBrowser } from 'auto-browser';
-
-const ab = new AutoBrowser();
-await ab.connect();
-await ab.navigate('https://example.com');
-
-// 建图
-const map = await ab.buildMap({ compress: true });
-console.log(`Found ${map.elements.length} elements`);
-
-// 检测框架
-const framework = await ab.detectFramework();
-console.log(`Framework: ${framework.detected}`);
-
-// 可视化
-await ab.injectOverlay(map.elements);
-
-// 智能执行（使用缓存）
-const result = await ab.smartExecute('https://example.com', 'click login');
-
-await ab.disconnect();
-```
-
-## MCP Server
-
-```bash
-auto-browser mcp
-```
-
-或在 MCP 客户端配置：
-```json
-{
-  "mcpServers": {
-    "auto-browser": {
-      "command": "auto-browser",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+| bb-browser 优势 | auto-browser 已吸收 |
+|----------------|-------------------|
+| Site adapter 模式 | ✅ site/registry/ 8 个内置 |
+| network requests --with-body | ✅ core/network.mjs |
+| Daemon HTTP API | ✅ daemon/index.mjs |
+| Tab 管理 | ✅ CLI: tab list/new/close |
+| --json / --jq 输出 | ✅ --json 支持 |
+| bb-sites 社区生态 | ⚠️ 基础框架已搭，待社区贡献 |
 
 ## Token 节省
 
-| 场景 | 每步建图 | Auto-Browser |
-|------|---------|--------------|
-| 首次访问 | ~2000 tokens | ~2000 tokens |
-| 二次访问 | ~2000 tokens | **0 tokens** ✅ |
-| 第 100 次 | ~2000 tokens | **0 tokens** ✅ |
-| 页面改版 | ~2000 tokens | ~500 tokens（差分） |
+| 模式 | 首次 | 后续 |
+|------|------|------|
+| 建图执行 | ~2000 tokens | **0 tokens** |
+| Site Adapter | **0 tokens** (直接 fetch) | **0 tokens** |
+| Network Capture | **0 tokens** (CDP 抓包) | **0 tokens** |
 
 ## 关键经验
 
-1. **坐标必须取整** — puppeteer `dispatchMouseEvent` 在 Windows 上不接受浮点坐标
-2. **下拉框** — CDP 点击 trigger → 1200ms 等 popper 动画 → CDP 点击选项 / JS 降级
-3. **Tab 切换** — Vue 的 `@click` 能响应 JS `el.click()`，CDP 坐标点击不一定触发
-4. **图标按钮** — 用 `cursor:pointer + SVG 子元素` 检测，不是 `role="button"`
-5. **缓存复用** — URL pattern 匹配，7 天过期，出错自动重建
+1. **坐标必须取整** — puppeteer `dispatchMouseEvent` 不接受浮点坐标
+2. **Site Adapter** — 运行 `page.evaluate(fetch)` 直接用浏览器 cookie，零额外 cost
+3. **Network Capture** — 用 CDP `Network.enable` 拦截请求，比代理方式更干净
+4. **Daemon** — HTTP API 让任何语言的客户端都可以用浏览器能力
 
-## 测试覆盖
+## 注意事项
 
-已测试 10+ 网站：
-- Google, Baidu（搜索）
-- GitHub（代码平台）
-- Bilibili（视频站）
-- JD.com（电商，1434 元素）
-- Element Plus, Ant Design Pro（UI 框架）
-- Kaggle（竞赛平台）
+- Chrome 需要 `--remote-debugging-port=9222` 启动
+- Site Adapters 用 `page.evaluate` 在浏览器上下文跑 JS
+- `npm install -g auto-browser` 安装全局 CLI

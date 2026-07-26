@@ -1,7 +1,7 @@
 {
   "name": "auto-browser",
-  "version": "1.0.0",
-  "description": "CDP-driven browser automation framework — build a page map once, execute scripts forever. Zero screenshots, zero per-call LLM cost.",
+  "version": "2.0.0",
+  "description": "Your browser is the API. CLI + MCP + Daemon for AI agents. Page maps, site adapters, network capture, UI framework detection.",
   "type": "module",
   "main": "api/index.mjs",
   "bin": {
@@ -15,12 +15,16 @@
     "adapters/",
     "detector/",
     "mcp/",
+    "site/",
+    "daemon/",
     "SKILL.md"
   ],
   "scripts": {
     "start": "node bin/cli.mjs",
     "map": "node bin/cli.mjs map",
-    "mcp": "node mcp/server.mjs"
+    "mcp": "node mcp/server.mjs",
+    "daemon": "node bin/cli.mjs daemon start",
+    "site": "node bin/cli.mjs site"
   },
   "keywords": [
     "browser-automation",
@@ -29,6 +33,11 @@
     "web-scraping",
     "page-map",
     "mcp",
+    "site-adapter",
+    "network-capture",
+    "daemon",
+    "bb-browser",
+    "browser-as-api",
     "element-plus",
     "ant-design",
     "mui"
@@ -40,7 +49,8 @@
     "url": "https://github.com/zhifeng-z/auto-browser.git"
   },
   "dependencies": {
-    "puppeteer-core": "^25.3.0"
+    "puppeteer-core": "^25.3.0",
+    "ws": "^8.18.0"
   },
   "engines": {
     "node": ">=18.0.0"
