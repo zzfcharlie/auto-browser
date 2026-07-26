@@ -55,6 +55,10 @@ const [,, cmd, ...args] = process.argv;
 // ============================================================
 
 let _ab = null;
+let _lastElements = []; // cache of last snap/map elements for @ref click
+let _overlayActive = false; // persistent overlay state
+
+
 async function getAB() {
   if (!_ab) {
     _ab = new AutoBrowser();
@@ -91,6 +95,17 @@ Your browser is the API. No keys. No bots. No scrapers.
 === Site Adapters (zero-token data extraction) ===
   site [list]            List available site adapters
   site <name> [args]     Run a site adapter (e.g. github-repo owner=zzfcharlie repo=auto-browser)
+
+=== Overlay (bb-browser style element highlighting) ===
+  snap -i                Snapshot with numbered overlay injected
+  snap --inject          Same as -i
+  overlay inject         Inject numbered overlay on cached elements
+  overlay remove         Remove the numbered overlay
+
+=== Click by Reference ===
+  click @3               Click element #3 from last snapshot
+  click <x> <y>          Click at pixel coordinates
+  click <selector>       Click element matching CSS selector
 
 === Network Capture ===
   network start          Start capturing network requests
@@ -401,15 +416,33 @@ async function main() {
       const ab = await getAB();
       const map = await ab.buildMap({ compress: true });
       const fw = await ab.detectFramework();
+      _lastElements = map.elements; // cache for @ref clicks
+
       console.log(`\nTitle: ${map.title}`);
       console.log(`Framework: ${fw.detected}`);
       console.log(`Elements: ${map.elements.length}\n`);
-      map.elements.slice(0, 30).forEach((el, i) => {
-        console.log(`  #${i + 1}: <${el.tag}> "${String(el.text || '').slice(0, 45)}" at (${el.rect.x},${el.rect.y})`);
+
+      // Print with @ref numbers (bb-browser style)
+      map.elements.slice(0, 50).forEach((el, i) => {
+        const ref = `@${i + 1}`.padEnd(4);
+        const tag = el.tag.padEnd(8);
+        const vis = el.visible ? '' : '[HID]';
+        const text = String(el.text || '').slice(0, 45);
+        console.log(`  ${ref} <${tag}> ${vis} "${text}" at (${el.rect.x},${el.rect.y})`);
       });
-      if (map.elements.length > 30) {
-        console.log(`  ... and ${map.elements.length - 30} more`);
+      if (map.elements.length > 50) {
+        console.log(`  ... and ${map.elements.length - 50} more`);
       }
+
+      // Inject overlay if -i or --inject flag
+      if (args.includes('-i') || args.includes('--inject')) {
+        await ab.injectOverlay(map.elements);
+        _overlayActive = true;
+        console.log('\n🟢 Overlay injected! Elements are numbered on screen.');
+        console.log('   Use "click @N" to click by number.');
+        console.log('   Use "overlay remove" to clear.');
+      }
+
       if (args.includes('--json')) {
         console.log('\n--- JSON ---');
         console.log(JSON.stringify(map, null, 2));
@@ -467,7 +500,27 @@ async function main() {
     // ==================== CLICK ====================
     case 'click': {
       const page = await getPage();
-      // Click by selector if first arg starts with .
+
+      // Click by @ref number (bb-browser style)
+      if (args[0]?.startsWith('@')) {
+        const refNum = parseInt(args[0].slice(1));
+        if (isNaN(refNum) || refNum < 1 || refNum > _lastElements.length) {
+          console.error(`Invalid ref: ${args[0]}. Available: 1-${_lastElements.length}`);
+          console.log('Run "snap" first to see element references.');
+          process.exit(1);
+        }
+        const el = _lastElements[refNum - 1];
+        if (!el.center) {
+          console.error(`Element @${refNum} has no center coordinates`);
+          process.exit(1);
+        }
+        await page.mouse.click(el.center.x, el.center.y);
+        console.log(`Clicked @${refNum}: <${el.tag}> "${String(el.text || '').slice(0, 40)}" at (${el.center.x},${el.center.y})`);
+        await new Promise(r => setTimeout(r, 500));
+        break;
+      }
+
+      // Click by selector if first arg starts with . or #
       if (args[0]?.startsWith('.') || args[0]?.startsWith('#')) {
         const el = await page.$(args[0]);
         if (!el) { console.error(`Element not found: ${args[0]}`); process.exit(1); }
@@ -479,7 +532,7 @@ async function main() {
         await page.mouse.click(x, y);
         console.log(`Clicked at (${x}, ${y})`);
       } else {
-        console.error('Usage: auto-browser click <x> <y>  OR  auto-browser click <selector>');
+        console.error('Usage: auto-browser click <@N | x y | selector>');
         process.exit(1);
       }
       break;
@@ -565,6 +618,40 @@ async function main() {
         }
         default:
           console.log('Usage: auto-browser tab [list|new|close]');
+      }
+      break;
+    }
+
+    // ==================== OVERLAY ====================
+    case 'overlay': {
+      const sub = args[0];
+      const ab = await getAB();
+      const page = ab.getPage();
+
+      switch (sub) {
+        case 'inject':
+        case 'show':
+        case 'on': {
+          if (_lastElements.length === 0) {
+            console.log('No elements cached. Run "snap" first.');
+            break;
+          }
+          await ab.injectOverlay(_lastElements);
+          _overlayActive = true;
+          console.log(`🟢 Overlay injected: ${_lastElements.length} elements numbered.`);
+          break;
+        }
+        case 'remove':
+        case 'hide':
+        case 'off': {
+          const { removeOverlay } = await import('../core/map.mjs');
+          await removeOverlay(page);
+          _overlayActive = false;
+          console.log('🔴 Overlay removed.');
+          break;
+        }
+        default:
+          console.log('Usage: auto-browser overlay [inject|remove]');
       }
       break;
     }
