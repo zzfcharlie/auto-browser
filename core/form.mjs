@@ -70,6 +70,38 @@ export async function fillForm(page, fields) {
   }
 }
 
+export async function selectValue(page, selector, value) {
+  const selected = await page.$eval(selector, (el, target) => {
+    if (el.tagName !== 'SELECT') throw new Error('selectValue requires a native select');
+    const option = [...el.options].find(o => o.value === target || o.textContent.trim() === target);
+    if (!option) return false;
+    el.value = option.value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }, value);
+  if (!selected) throw new Error(`Option not found: ${value}`);
+  return true;
+}
+
+export async function setChecked(page, selector, checked = true) {
+  await page.$eval(selector, (el, target) => {
+    if (!['checkbox', 'radio'].includes(el.type)) throw new Error('setChecked requires checkbox or radio');
+    if (el.checked !== target) el.click();
+  }, checked);
+  return true;
+}
+
+export async function fillContentEditable(page, selector, value) {
+  await page.$eval(selector, (el, target) => {
+    if (!el.isContentEditable) throw new Error('Element is not contenteditable');
+    el.focus();
+    el.textContent = target;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: target }));
+  }, value);
+  return true;
+}
+
 // --- Read all form items in current active tab ---
 
 export async function readForm(page) {

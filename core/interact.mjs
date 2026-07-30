@@ -28,7 +28,9 @@ export async function hover(page, el) {
 export async function type(page, el, value) {
   if (!el) throw new Error('type: element not found');
   await click(page, el);
-  await page.keyboard.selectAll();
+  await page.keyboard.down('Control');
+  await page.keyboard.press('A');
+  await page.keyboard.up('Control');
   await page.keyboard.press('Delete');
   await page.keyboard.type(value, { delay: 10 });
 }

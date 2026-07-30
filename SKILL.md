@@ -1,123 +1,175 @@
 ---
 name: auto-browser
 description: >-
-  CDP-driven browser automation framework. Build page maps, run site
-  adapters (eval+fetch), capture network traffic. No API keys needed.
-  Your real browser is the API. 0 tokens on repeat operations.
+  CDP-driven browser automation. Every discovered element reports its
+  semantic kind (link/text/select/checkbox/slider/...) and the exact
+  commands it accepts, so an agent never guesses how to interact.
+  Auto-launches Chrome on a dedicated profile. No API keys.
 ---
 
-# Auto-Browser
+# auto-browser v3
 
-> 一次建图，永久复用。零截图、零每轮理解成本。
+> Discover once, act precisely. Elements are self-describing.
 
-## 核心理念
+Full agent manual: `AGENTS.md`. This file is the condensed version.
 
-传统方案（openchrome / browser-use）：
-```
-每次操作 → LLM 理解页面 → 定位元素 → 执行 → 下次重复
-                                                ↑ token 浪费在这里
-```
+## Core loop
 
-Auto-Browser v2.0 三模式：
-```
-模式1: 建图缓存 — 建图一次，零 token 重复执行
-模式2: Site Adapter — 直接 eval + fetch，零 token 拿数据
-模式3: Network Capture — CDP 抓包，零 token 反向工程 API
-```
-
-## CLI 命令速查
-
-### 建图
 ```bash
-auto-browser map https://example.com           # 建图（7层检测）
-auto-browser map https://example.com -v        # 带可视化 overlay
-auto-browser cache list                         # 看缓存
-auto-browser cache clear                        # 清缓存
+auto-browser open <url>          # navigate (Chrome auto-launches)
+auto-browser find "<text>"       # discover: kind + valid actions + href
+auto-browser click @e12          # act on a @ref
 ```
 
-### Site Adapter（取数据，零 token）
+## Why elements are self-describing
+
+```
+@e52    link            [click,open]           "查询所有列"
+         -> https://www.nowcoder.com/practice/f9f8...
+@e140   text            [fill,type,click]      "请选择"
+         value="中国 +86"
+@f1-e2  select          [select,click]         "Volvo Saab Opel Audi"
+         value="audi"
+         options: Volvo | Saab | Opel | Audi
+```
+
+`@ref` · `kind` · `[actions]` · `"label"` · then href/value/options.
+Read the `actions` list and use exactly that command. No guessing.
+
+Every discover command prints a page census:
+```
+Kinds: link=124  button=14  text=8  dropdown=2  icon=1  label=1
+```
+
+## Discover
+
 ```bash
-auto-browser site list                                     # 列出所有适配器
-auto-browser site github-repo owner=zzfcharlie repo=auto-browser  # GitHub 仓库信息
-auto-browser site github-search query="browser automation"        # GitHub 搜索
-auto-browser site arxiv-search query=transformer                  # arXiv 论文
-auto-browser site hackernews count=20                             # HackerNews 热榜
-auto-browser site wikipedia title=Python                          # Wikipedia 摘要
-auto-browser site zhihu                                            # 知乎热榜
-auto-browser site baidu query="auto-browser"                      # 百度搜索
+auto-browser find "登录"                # by text
+auto-browser find --kind=select         # by type
+auto-browser find --action=fill         # by supported action
+auto-browser find "SQL" --kind=link     # combine
+auto-browser find ... --json            # machine-readable
+auto-browser links --contain=/practice/ # harvest hrefs, no clicking
+auto-browser snap --kind=button         # survey with filters
 ```
 
-### Network 抓包
+19 kinds: `link button text textarea select dropdown checkbox radio toggle
+slider file tab menuitem option icon label contenteditable draggable clickable`
+
+11 actions: `click open fill type select check uncheck contenteditable
+upload drag hover`
+
+## Act — `@ref` or CSS selector, interchangeably
+
 ```bash
-auto-browser network nav https://example.com --with-body --json   # 一键抓所有请求
-auto-browser network start                                          # 开抓
-auto-browser open https://example.com                               # 导航
-auto-browser network stop --json                                    # 看结果
+auto-browser click @e52
+auto-browser fill @e140 "13800138000"
+auto-browser select @f1-e2 "Audi"
+auto-browser check @e3
+auto-browser contenteditable @e4 "text"
+auto-browser upload @e2 ./file.pdf
+auto-browser drag @e1 --by=150,0        # slider
+auto-browser drag @e5 @e6               # onto another element
+auto-browser hover @e9
 ```
 
-### Daemon 后台
+`@ref`s survive DOM rebuilds (CSS → XPath → semantic scoring, with a
+low-confidence warning). `click` reports whether the page actually changed;
+`fill` reads back the DOM value to confirm.
+
+## Extract
+
 ```bash
-auto-browser daemon start                           # 启动后台
-auto-browser daemon status                          # 查看状态
-curl -X POST http://127.0.0.1:19824/command \       # HTTP API
-  -d '{"method":"site/run","params":{"adapter":"hackernews"}}'
+auto-browser eval --file scrape.js       # complex DOM traversal
+auto-browser links --contain=/x/ --json  # bulk URLs
+auto-browser site hackernews count=20    # prebuilt adapters
+auto-browser network nav <url> --with-body --json   # find the page's own API
 ```
 
-### 浏览器交互
+**Never pass non-trivial JS inline** — shells strip inner quotes and
+`a[href*="/x/"]` arrives as `a[href*=/x/]`, which throws. Use `--file`.
+File contents are wrapped in an async IIFE, so multi-line + `return` + `await` work.
+
+## Wait
+
 ```bash
-auto-browser open https://example.com      # 导航
-auto-browser snap                           # 快照页面元素
-auto-browser detect                         # 检测 UI 框架
-auto-browser click 500 300                  # 坐标点击
-auto-browser click .btn-submit              # 选择器点击
-auto-browser fill #username "hello"          # 填输入框
-auto-browser eval "document.title"           # 执行 JS
-auto-browser screenshot                      # 截图
+auto-browser wait stable
+auto-browser wait text "加载完成"
+auto-browser wait selector "#app"
+auto-browser wait url "github.com"
 ```
 
-## 架构
+## Chrome lifecycle
 
-```
-auto-browser v2.0/
-├── core/           CDP 连接、DOM、交互、表单、建图、抓包
-├── detector/       UI 框架检测（Element Plus / AntD / MUI）
-├── adapters/       框架适配器（表单操作）
-├── site/           Site 适配器（GitHub / arXiv / HackerNews / 知乎...）
-├── daemon/         后台 HTTP 服务
-├── cache/          缓存管理（maps + scripts）
-├── api/            AutoBrowser 主类
-├── mcp/            MCP Server
-└── bin/            CLI 入口
+```bash
+auto-browser launch          # optional — every command auto-launches
+auto-browser launch --force  # kill and restart clean
+auto-browser status
+auto-browser close           # leaves your normal Chrome alone
 ```
 
-## 与 bb-browser 对比吸收
+Runs on a dedicated profile (`%LOCALAPPDATA%\auto-browser\chrome-profile`).
+That's what avoids the classic trap: launching Chrome with
+`--remote-debugging-port` while normal Chrome runs on the default profile
+silently reuses that process and never opens the port. A separate profile
+can't collide. Startup polls `/json/version` until the endpoint truly answers.
+Login state persists across runs.
 
-| bb-browser 优势 | auto-browser 已吸收 |
-|----------------|-------------------|
-| Site adapter 模式 | ✅ site/registry/ 8 个内置 |
-| network requests --with-body | ✅ core/network.mjs |
-| Daemon HTTP API | ✅ daemon/index.mjs |
-| Tab 管理 | ✅ CLI: tab list/new/close |
-| --json / --jq 输出 | ✅ --json 支持 |
-| bb-sites 社区生态 | ⚠️ 基础框架已搭，待社区贡献 |
+Overrides: `AUTO_BROWSER_CHROME`, `AUTO_BROWSER_PROFILE`, `AUTO_BROWSER_PORT`.
 
-## Token 节省
+## Traps
 
-| 模式 | 首次 | 后续 |
-|------|------|------|
-| 建图执行 | ~2000 tokens | **0 tokens** |
-| Site Adapter | **0 tokens** (直接 fetch) | **0 tokens** |
-| Network Capture | **0 tokens** (CDP 抓包) | **0 tokens** |
+| Symptom | Fix |
+|---|---|
+| `not a valid selector` from `eval` | Use `eval --file` |
+| `Element not found: @e5` | Re-run `snap` / `find` |
+| Blank `Page:`, 0 results | You forgot `open <url>` |
+| `select` fails | It's `kind=dropdown`, not `select` — `click` to open, then `click` the option |
+| 0 matches in `find` | Add `--all`; check the `Kinds:` census |
+| `no-observable-change` | Click did nothing; try the parent element |
+| Custom dropdown ignores clicks | Use `click` (real CDP events), not `eval` + `.click()` |
 
-## 关键经验
+## Rules
 
-1. **坐标必须取整** — puppeteer `dispatchMouseEvent` 不接受浮点坐标
-2. **Site Adapter** — 运行 `page.evaluate(fetch)` 直接用浏览器 cookie，零额外 cost
-3. **Network Capture** — 用 CDP `Network.enable` 拦截请求，比代理方式更干净
-4. **Daemon** — HTTP API 让任何语言的客户端都可以用浏览器能力
+1. Never guess a type — `find` reports `kind` and `actions`.
+2. Read `href` from output; don't click to discover URLs.
+3. Non-trivial JS goes in a file.
+4. Check `Kinds:` before drilling in.
+5. Sort extracted lists by `rect.y` — visual order ≠ DOM order ≠ ID order.
+6. `wait` beats sleeping.
+7. Check `site list` before writing a scraper.
 
-## 注意事项
+## Architecture
 
-- Chrome 需要 `--remote-debugging-port=9222` 启动
-- Site Adapters 用 `page.evaluate` 在浏览器上下文跑 JS
-- `npm install -g auto-browser` 安装全局 CLI
+```
+core/       launcher (auto-launch/close) · map (kind+actions) · interact
+            form · network · wait · diff · dom · browser
+detector/   Element Plus / Ant Design / MUI detection
+site/       8 zero-cost adapters + loader
+daemon/     HTTP API on :19824
+api/        AutoBrowser class
+mcp/        MCP server
+bin/cli.mjs CLI entry
+```
+
+## Programmatic
+
+```javascript
+import { AutoBrowser } from 'auto-browser';
+const ab = new AutoBrowser();
+await ab.connect();                  // auto-launches
+await ab.navigate('https://example.com');
+const map = await ab.buildMap({ compress: true });
+// map.kinds, map.elements[].{ref,kind,actions,href,value,options,locator,rect}
+
+import { queryMap } from 'auto-browser/core/map.mjs';
+queryMap(map, { kind: 'link', text: 'SQL' });
+
+import { ensureChrome, closeChrome } from 'auto-browser/core/launcher.mjs';
+```
+
+## Limits
+
+Cross-origin iframes skipped · closed Shadow DOM unreachable · custom dropdowns
+need open-then-click · `diff` rebuilds rather than observing mutations ·
+daemon/MCP lack URL allow-lists.

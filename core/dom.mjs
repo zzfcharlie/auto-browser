@@ -34,7 +34,7 @@ export async function findAll(page, selector, { visible = true } = {}) {
         return {
           tag: el.tagName,
           text: el.textContent.trim().slice(0, 100),
-          cls: el.className.slice(0, 60),
+          cls: (typeof el.className === 'string' ? el.className : el.className?.baseVal || '').slice(0, 60),
           rect: {
             x: Math.round(r.x), y: Math.round(r.y),
             w: Math.round(r.width), h: Math.round(r.height)

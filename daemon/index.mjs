@@ -64,7 +64,7 @@ function getPage(tabId) {
 function jsonResponse(res, data, status = 200) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': 'http://127.0.0.1',
   });
   res.end(JSON.stringify(data));
 }
@@ -128,7 +128,7 @@ async function handleCommand(method, params = {}) {
     case 'navigate/back': {
       const tabId = params.tab || (await ensureConnected());
       const page = getPage(tabId);
-      await page.goBack({ waitUntil: 'networkidle0' });
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30000 });
       _daemonState.pages[tabId].url = page.url();
       _daemonState.pages[tabId].title = await page.title();
       return { tab: tabId, url: page.url() };
@@ -137,7 +137,7 @@ async function handleCommand(method, params = {}) {
     case 'navigate/reload': {
       const tabId = params.tab || (await ensureConnected());
       const page = getPage(tabId);
-      await page.reload({ waitUntil: 'networkidle0' });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
       return { tab: tabId, reloaded: true };
     }
 
@@ -212,7 +212,9 @@ async function handleCommand(method, params = {}) {
       const { selector, value } = params;
       if (!selector) throw new Error('Provide a CSS selector');
       await page.click(selector);
-      await page.keyboard.selectAll();
+      await page.keyboard.down('Control');
+      await page.keyboard.press('A');
+      await page.keyboard.up('Control');
       await page.keyboard.press('Delete');
       await page.keyboard.type(value, { delay: 10 });
       return { tab: tabId, filled: true };
@@ -347,7 +349,7 @@ export async function startDaemon(options = {}) {
     // CORS
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': 'http://127.0.0.1',
         'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
       });
@@ -365,8 +367,8 @@ export async function startDaemon(options = {}) {
           const result = await handleCommand(method, params);
           jsonResponse(res, { result });
         } catch (e) {
-          const status = e.message.includes('not found') || e.message.includes('Provide') ? 400 : 500;
-          errorResponse(res, e.message, '', status);
+          const status = e.message.includes('not found') || e.message.includes('Provide') || e.message.includes('requires') ? 400 : 500;
+          errorResponse(res, e.message, status === 400 ? 'Check the method parameters and current tab state.' : 'Inspect daemon logs for details.', status);
         }
       });
       return;

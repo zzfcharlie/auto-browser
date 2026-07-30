@@ -3,6 +3,9 @@ import { buildMap, injectOverlay, removeOverlay } from '../core/map.mjs';
 import { detectFramework } from '../detector/index.mjs';
 import { CacheManager } from '../cache/manager.mjs';
 import * as network from '../core/network.mjs';
+import { waitForSelector, waitForText, waitForUrl, waitForDomStable } from '../core/wait.mjs';
+import { diffMaps } from '../core/diff.mjs';
+import { ensureChrome } from '../core/launcher.mjs';
 
 const CDP_URL = 'http://127.0.0.1:9222';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -16,7 +19,11 @@ export class AutoBrowser {
   }
 
   async connect(hostname) {
-    this.browser = await puppeteer.connect({ browserURL: this.cdpUrl });
+    // Guarantee a CDP-enabled Chrome exists before connecting so a single
+    // invocation works on any machine (auto-launch dedicated profile if needed).
+    const portStr = new URL(this.cdpUrl).port;
+    const ready = await ensureChrome({ port: portStr ? Number(portStr) : undefined });
+    this.browser = await puppeteer.connect({ browserURL: ready.browserURL });
     const pages = await this.browser.pages();
     
     if (hostname) {
@@ -46,8 +53,8 @@ export class AutoBrowser {
 
   async navigate(url) {
     if (!this.page) throw new Error('Not connected. Call connect() first.');
-    await this.page.goto(url, { waitUntil: 'networkidle0', timeout: 15000 });
-    await sleep(2000);
+    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await sleep(500);
   }
 
   async buildMap(options = {}) {
@@ -58,6 +65,14 @@ export class AutoBrowser {
   async detectFramework() {
     if (!this.page) throw new Error('Not connected. Call connect() first.');
     return detectFramework(this.page);
+  }
+
+  async waitForSelector(selector, options = {}) { return waitForSelector(this.page, selector, options); }
+  async waitForText(text, options = {}) { return waitForText(this.page, text, options); }
+  async waitForUrl(pattern, options = {}) { return waitForUrl(this.page, pattern, options); }
+  async waitForDomStable(options = {}) { return waitForDomStable(this.page, options); }
+  async diffMaps(previous, options = {}) {
+    return diffMaps(previous, await this.buildMap(options));
   }
 
   async injectOverlay(elements) {

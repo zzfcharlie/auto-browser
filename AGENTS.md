@@ -1,279 +1,478 @@
-# auto-browser Agent Workflow Guide
+# auto-browser v3 — Agent Reference
 
-> A step-by-step guide for AI agents (OpenCode, Claude Code, Codex) to use auto-browser v2.0 CLI to explore websites. No API keys needed — uses your real Chrome with CDP.
+Manual for AI agents (OpenCode, Claude Code, Codex, or any weaker model) driving
+`auto-browser` from a shell. Read the **Core Loop** and **Element Kinds** sections
+first; everything else is lookup material.
 
-## Prerequisites
+Command form: `auto-browser <cmd>` if installed globally, otherwise
+`node bin/cli.mjs <cmd>` from the repo root.
 
-1. Chrome running with remote debugging on port 9222:
-   ```powershell
-   # Windows
-   Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" `
-     -ArgumentList "--remote-debugging-port=9222"
-   
-   # macOS
-   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
-   
-   # Linux
-   google-chrome --remote-debugging-port=9222
-   ```
+---
 
-2. auto-browser installed:
-   ```bash
-   npm install -g auto-browser
-   ```
+## 0. TL;DR — the only workflow you need
 
-3. auto-browser locally (if developing):
-   ```bash
-   cd /path/to/auto-browser
-   npm install
-   ```
-
-## CLI Reference
-
-All commands use: `node bin/cli.mjs` (local) or `auto-browser` (global)
-
-### Navigation & Observation
-| Command | Description |
-|---------|-------------|
-| `open <url>` | Navigate to URL |
-| `snap` | Snapshot current page (build element map) |
-| `snap --json` | Snapshot with JSON output for parsing |
-| `detect` | Detect UI framework on page |
-| `screenshot` | Take JPEG screenshot (base64) |
-| `eval <js>` | Execute JavaScript in page context |
-| `get <attr>` | Get page attribute (title, url, html, text) |
-
-### Interaction
-| Command | Description |
-|---------|-------------|
-| `click <x> <y>` | Click at pixel coordinates |
-| `click <selector>` | Click element matching CSS selector |
-| `fill <selector> <value>` | Fill input field |
-| `type <text>` | Type text (after focusing input) |
-| `scroll <x> <y>` | Scroll to position |
-
-### Page Maps (7-Layer Detection)
-| Command | Description |
-|---------|-------------|
-| `map <url>` | Build full page element map |
-| `map <url> -v` | Build map with visual overlay |
-
-### Site Adapters (eval+fetch, 0 tokens)
-| Command | Description |
-|---------|-------------|
-| `site list` | List available adapters |
-| `site <name> key=value` | Run adapter (e.g. `site hackernews count=20`) |
-
-### Network Capture
-| Command | Description |
-|---------|-------------|
-| `network start` | Start capturing requests |
-| `network requests` | Show captured requests |
-| `network stop` | Stop and show results |
-| `network nav <url>` | One-shot capture with navigation |
-| `network nav <url> --with-body --json` | Capture with response bodies |
-
-### Daemon Mode
-| Command | Description |
-|---------|-------------|
-| `daemon start` | Start HTTP daemon on :19824 |
-| `daemon status` | Check daemon status |
-| `daemon stop` | Stop daemon |
-
-### Cache Management
-| Command | Description |
-|---------|-------------|
-| `cache list` | List cached page maps |
-| `cache clear` | Clear all cache |
-
-## Workflow: Explore Kaggle Competitions
-
-This is the canonical example workflow. Follow these steps in order.
-
-### Step 1: Check Chrome CDP
 ```bash
-# Verify Chrome is listening on CDP port
-curl http://127.0.0.1:9222/json/version
-```
-Expected: Returns JSON with Chrome version info.
-If fails: Start Chrome with `--remote-debugging-port=9222` flag.
-
-### Step 2: Test auto-browser
-```bash
-# Local development
-node bin/cli.mjs help
-
-# Or if installed globally
-auto-browser help
-```
-Expected: Shows all available commands.
-If auto-browser not found: Run `npm install` first.
-
-### Step 3: Open Kaggle Competitions
-```bash
-node bin/cli.mjs open https://www.kaggle.com/competitions
-```
-Expected: Prints "Opened: https://www.kaggle.com/competitions" and page title.
-
-### Step 4: Build Page Map
-```bash
-node bin/cli.mjs snap --json
-```
-Expected: Shows element count, detected framework, and up to 30 elements.
-The JSON output contains all interactive elements with their positions.
-
-### Step 5: Parse Results
-Look for key information in the output:
-- `Title:` — page title
-- `Elements: N` — total interactive elements found
-- `Framework:` — detected UI framework
-- Each element shows: `#tag: <TAG> "text" at (x,y)`
-
-### Step 6: Find Specific Content
-Search the element list for keywords:
-- "playground", "competition", "titanic", etc.
-- Note the element index and position for clicking.
-
-### Step 7: Navigate to Competition Detail
-```bash
-node bin/cli.mjs open https://www.kaggle.com/competitions/<competition-id>
-```
-Use the competition ID found in Step 5-6.
-
-### Step 8: Explore Competition Tabs
-Once on the competition page, use snap to see available tabs:
-```bash
-node bin/cli.mjs snap
+auto-browser open <url>              # 1. navigate
+auto-browser find "<text>"           # 2. discover: what's on the page, what can I do
+auto-browser click @e12              # 3. act on a @ref from step 2
 ```
 
-### Step 9: Take Screenshot (optional)
+Every element you discover reports **what it is** (`kind`) and **what actions it
+accepts** (`actions`). You never have to guess whether something is a button, a
+dropdown, or a slider.
+
+Chrome auto-launches on any command. You do **not** need to start Chrome yourself,
+and you do **not** need `--remote-debugging-port` in your own Chrome.
+
+---
+
+## 1. Core Loop
+
+### Step 1 — Navigate
+
 ```bash
-node bin/cli.mjs screenshot
-```
-Saves a JPEG screenshot to the current directory.
-
-### Step 10: Network Capture (for API reverse-engineering)
-```bash
-node bin/cli.mjs network nav https://example.com --with-body --json
-```
-Captures all XHR/fetch requests. Useful for finding hidden APIs.
-
-## Workflow: Site Adapters (0-token data extraction)
-
-Site adapters are pre-built scripts that use `page.evaluate()` + `fetch()` to extract structured data directly.
-
-### List Available Adapters
-```bash
-node bin/cli.mjs site list
+auto-browser open https://example.com
 ```
 
-### Run an Adapter
+Uses `domcontentloaded`, so SPAs and sites with long-polling (GitHub, Kaggle,
+Nowcoder) don't hang. If content loads late:
+
 ```bash
-node bin/cli.mjs site hackernews count=20
+auto-browser wait stable             # DOM stopped changing
+auto-browser wait text "加载完成"     # specific text appeared
+auto-browser wait selector "#app"    # specific node appeared
 ```
 
-### Available Built-in Adapters
-| Adapter | Params | Description |
-|---------|--------|-------------|
-| `github-repo` | owner, repo | GitHub repo info (stars, forks, language) |
-| `github-search` | query, sort | Search GitHub repos |
-| `arxiv-search` | query, maxResults | Search arXiv papers |
-| `hackernews` | count | Top HackerNews stories |
-| `wikipedia` | title | Wikipedia article summary |
-| `zhihu` | (none) | Zhihu hot topics |
-| `baidu` | query, pn | Baidu search (uses real browser) |
+### Step 2 — Discover
 
-### Adding New Adapters
-Create a file in `site/registry/<name>.mjs`:
+Three commands. Pick based on what you want:
+
+| Goal | Command |
+|---|---|
+| Find a specific control by its label | `find "登录"` |
+| Find all controls of one type | `find --kind=text` |
+| Find everything you can type into | `find --action=fill` |
+| Grab every URL on the page | `links` |
+| Survey the whole page | `snap` |
+
+```bash
+auto-browser find "提交"                    # by visible text
+auto-browser find --kind=select             # by element type
+auto-browser find --action=fill             # by supported action
+auto-browser find "SQL" --kind=link         # combine
+auto-browser find --kind=button --json      # machine-readable
+auto-browser find "x" --all                 # include hidden elements
+```
+
+Output is one self-describing line per element:
+
+```
+  @e52    link            [click,open]           "查询所有列"
+           -> https://www.nowcoder.com/practice/f9f8...
+  @e140   text            [fill,type,click]      "请选择"
+           value="中国 +86"
+  @f1-e2  select          [select,click]         "Volvo Saab Opel Audi"
+           value="audi"
+           options: Volvo | Saab | Opel | Audi
+  @e3     checkbox        [check,uncheck,click]  "同意条款"  {REQ}
+```
+
+Read it as: `@ref` · `kind` · `[actions]` · `"label"` · `{flags}`, then indented
+extras (`->` href, `value=`, `options:`).
+
+Every discover command also prints a page-wide type census:
+
+```
+Kinds: link=124  button=14  text=8  dropdown=2  icon=1  label=1
+```
+
+Use this to orient before drilling in. 124 links and 8 text inputs tells you
+it's a listing page, not a form.
+
+### Step 3 — Act
+
+Take the `@ref` from step 2 and use the action the element advertised:
+
+```bash
+auto-browser click @e52
+auto-browser fill @e140 "13800138000"
+auto-browser select @f1-e2 "Audi"
+auto-browser check @e3
+```
+
+**Every action command accepts either `@ref` or a CSS selector.** These are equivalent:
+
+```bash
+auto-browser click @e52
+auto-browser click "a.question-link"
+```
+
+`@ref`s are stable across DOM rebuilds — they re-locate by CSS selector, then
+XPath, then semantic scoring (role + accessible name + text + position). If
+confidence is low you get a warning rather than a silent wrong click.
+
+---
+
+## 2. Element Kinds and Actions
+
+This is the table that removes the guesswork. `find --kind=<kind>` locates them.
+
+| kind | What it is | Use this command |
+|---|---|---|
+| `link` | `<a>` with a real href | `click` (or read `->` href directly) |
+| `button` | button, `role=button`, `<a>` without href | `click` |
+| `text` | text/email/tel/number/date input, `role=textbox` | `fill` |
+| `textarea` | `<textarea>` | `fill` |
+| `select` | native `<select>` | `select <@ref> "<option>"` |
+| `dropdown` | custom combobox (Element Plus / AntD / MUI) | `click` to open, then `click` the option |
+| `checkbox` | checkbox input or framework checkbox | `check` / `uncheck` |
+| `radio` | radio input | `check` |
+| `toggle` | switch / `role=switch` | `click` |
+| `slider` | `input[type=range]`, `role=slider` | `drag <@ref> --by=<dx>,0` |
+| `file` | `input[type=file]`, upload widget | `upload <@ref> <path>` |
+| `tab` | tab strip item | `click` |
+| `menuitem` | menu / nav entry | `click` |
+| `option` | dropdown option | `click` |
+| `icon` | icon-only clickable | `click` or `hover` |
+| `label` | `<label>` | `click` (toggles its control) |
+| `contenteditable` | rich-text editor div | `contenteditable <@ref> "<text>"` |
+| `draggable` | `draggable="true"` | `drag <@ref> <@target>` |
+| `clickable` | fallback — clickable but unclassified | `click` |
+
+Actions vocabulary: `click open fill type select check uncheck contenteditable
+upload drag hover`.
+
+**Flags** appearing in `{...}`: `HID` (not visible), `DISABLED`, `CHECKED`, `REQ` (required).
+
+### Important: `select` vs `dropdown`
+
+- `select` = native `<select>`. Use `select @ref "Audi"`. Works in one shot.
+- `dropdown` = a JS-rendered fake dropdown. `select` will **not** work.
+  You must `click` the dropdown to open it, then `find` the option, then `click` it.
+  Element Plus dropdowns in particular ignore synthetic events — `click` uses real
+  CDP mouse events, which is why it works.
+
+Type mismatches fail loudly with a usable hint:
+
+```
+$ auto-browser check @f1-e2
+check @f1-e2: not a checkbox/radio (got <SELECT> type="select-one")
+
+$ auto-browser select @f1-e2 "Tesla"
+select @f1-e2: option not found
+Available: Volvo | Saab | Opel | Audi
+```
+
+---
+
+## 3. Extracting Data
+
+### Links: never click through to collect URLs
+
+`snap`/`find`/`links` all emit resolved `href`. To harvest a list:
+
+```bash
+auto-browser links                            # every href, in page order
+auto-browser links --contain=/practice/       # filter by substring
+auto-browser links --contain=/practice/ --json
+auto-browser links --limit=500
+```
+
+Output is sorted top-to-bottom by on-screen position, which is usually the
+meaningful order (a numbered list's DOM order can be scrambled).
+
+### Complex extraction: `eval --file`
+
+For anything needing DOM traversal (walking up to a parent row, joining sibling
+cells, regex on container text), write JS to a file and run it.
+
+**Do not pass non-trivial JS inline.** Shells (PowerShell especially) strip inner
+quotes, so `document.querySelectorAll('a[href*="/x/"]')` arrives mangled as
+`a[href*=/x/]` and throws `not a valid selector`. This is a shell problem, not a
+JS problem — rewriting the JS will not fix it.
+
+```bash
+# Write scrape.js, then:
+auto-browser eval --file scrape.js
+auto-browser eval --stdin < scrape.js
+auto-browser eval "document.title"      # OK: no quotes, no semicolons
+```
+
+File contents are wrapped in an async IIFE, so multi-line statements and
+`return` both work, and you can `await`:
+
 ```javascript
-export const description = 'Description';
-export const params = ['param1', 'param2'];
-export default async function execute(page, { param1, param2 }) {
-  return page.evaluate(async ({ p1, p2 }) => {
-    const resp = await fetch('https://api.example.com/data');
-    return resp.json();
-  }, { p1: param1, p2: param2 });
-}
-```
-
-## Troubleshooting
-
-### Chrome CDP not responding
-```bash
-# Check port
-curl http://127.0.0.1:9222/json/version
-
-# Kill all Chrome and restart with CDP
-# Windows
-taskkill /F /IM chrome.exe
-Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" `
-  -ArgumentList "--remote-debugging-port=9222"
-```
-
-### auto-browser command not found
-```bash
-# Ensure dependencies installed
-cd /path/to/auto-browser
-npm install
-npm ls puppeteer-core
-```
-
-### Page not loading fully
-Wait for page to load before snapping:
-```bash
-node bin/cli.mjs open https://example.com
-# Wait 3-5 seconds for JS rendering
-node bin/cli.mjs snap
-```
-
-### "Cannot find module" errors
-```bash
-cd /path/to/auto-browser
-npm install
-```
-
-### Windows-specific: ESM import fails
-The site adapter loader uses `file://` URLs on Windows. This is handled automatically in v2.0.1+.
-
-## Output Format Examples
-
-### snap --json output
-```json
-{
-  "url": "https://www.kaggle.com/competitions",
-  "title": "Kaggle Competitions",
-  "viewport": { "w": 1920, "h": 1080 },
-  "elements": [
-    {
-      "tag": "A",
-      "text": "Titanic - Machine Learning from Disaster",
-      "rect": { "x": 100, "y": 200, "w": 300, "h": 50 },
-      "center": { "x": 250, "y": 225 },
-      "visible": true
+// scrape.js — harvest a table into structured rows
+const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+const rows = [...document.querySelectorAll('a')]
+  .filter(a => (a.getAttribute('href') || '').includes('/practice/'))
+  .map(a => {
+    // Walk up until an ancestor carries the row's ID text
+    let node = a, rowText = norm(a.textContent);
+    for (let i = 0; i < 6 && node.parentElement; i++) {
+      node = node.parentElement;
+      const t = norm(node.innerText);
+      if (/SQL\d+/.test(t)) { rowText = t; break; }
     }
-  ]
+    return {
+      no: (rowText.match(/SQL(\d+)/) || [])[1],
+      title: norm(a.textContent),
+      difficulty: (rowText.match(/(入门|简单|中等|困难)/) || [])[1] || '',
+      url: a.href,
+      y: Math.round(a.getBoundingClientRect().top)
+    };
+  })
+  .sort((a, b) => a.y - b.y);   // page order, not DOM order
+return rows.slice(0, 10);
+```
+
+### Site adapters: zero-cost for supported sites
+
+```bash
+auto-browser site list
+auto-browser site github-repo owner=zzfcharlie repo=auto-browser
+auto-browser site hackernews count=20
+auto-browser site arxiv-search query=transformer
+```
+
+Built in: `github-repo` `github-search` `arxiv-search` `hackernews` `wikipedia`
+`zhihu` `baidu` `youtube`. These run `fetch()` inside the page with your real
+cookies, so login-gated data works.
+
+Add one at `site/registry/<name>.mjs`:
+
+```javascript
+export const description = 'What it does';
+export const params = ['query', 'count'];
+export default async function execute(page, { query, count }) {
+  return page.evaluate(async ({ q, n }) => {
+    const resp = await fetch(`https://api.example.com/search?q=${q}&n=${n}`);
+    return resp.json();
+  }, { q: query, n: count });
 }
 ```
 
-### site adapter output
-```json
-[
-  {
-    "title": "HackerNews Story Title",
-    "url": "https://...",
-    "points": 123,
-    "author": "user",
-    "comments": 45
-  }
-]
+### Network capture: reverse-engineer the page's own API
+
+```bash
+auto-browser network nav https://example.com --with-body --json
 ```
 
-## Tips for AI Agents
+Often the fastest path — if the page fetches its data as JSON, read that
+endpoint instead of scraping the DOM.
 
-1. **Always use `--json` flag** when you need to parse output programmatically
-2. **Snap before clicking** — get coordinates from the element map
-3. **Multiple tabs** — use `tab new` to open a second tab, then `tab list` to see IDs
-4. **Cache is your friend** — maps are cached for 7 days, subsequent calls are instant
-5. **Network nav is powerful** — `network nav <url> --with-body --json` reveals all API endpoints the page calls
-6. **Use site adapters when possible** — they extract structured data in one shot
-7. **Coordinate clicks** — use `click <x> <y>` with coordinates from the snap output
+---
+
+## 4. Chrome Lifecycle
+
+```bash
+auto-browser launch            # explicit start
+auto-browser launch --force    # kill existing instance, start fresh
+auto-browser launch --headless
+auto-browser status            # running? which PIDs? what tabs?
+auto-browser close             # shut down
+```
+
+**You usually don't need `launch`** — every command auto-launches Chrome.
+
+How it avoids the classic failure: auto-browser starts Chrome with a **dedicated
+profile** at `%LOCALAPPDATA%\auto-browser\chrome-profile` (or `$XDG_DATA_HOME`).
+Launching `chrome.exe --remote-debugging-port=9222` while the user's normal Chrome
+is already running on the default profile silently reuses that process and never
+opens the debug port — the reason naive setups require closing every Chrome window
+first. A separate profile can't collide, so the port always opens. Startup polls
+`/json/version` until the endpoint truly responds, not just until the process spawns.
+
+`close` only kills processes whose command line contains our debug port, so the
+user's everyday Chrome windows are untouched.
+
+Login state persists in the dedicated profile across runs. First time you need
+an authenticated site, `launch` and log in manually once.
+
+Environment overrides: `AUTO_BROWSER_CHROME` (binary path),
+`AUTO_BROWSER_PROFILE` (profile dir), `AUTO_BROWSER_PORT` (debug port).
+
+---
+
+## 5. Command Reference
+
+### Discover
+| Command | Description |
+|---|---|
+| `snap` | Snapshot page; kinds census + first 50 elements |
+| `snap --kind=<k>` | Only one kind |
+| `snap --action=<a>` | Only elements supporting an action |
+| `snap --text=<s>` | Only elements matching text |
+| `snap --limit=<n>` | Show more than 50 |
+| `snap -i` | Also inject numbered on-screen overlay |
+| `find "<text>"` | Locate by visible text |
+| `find --kind=<k>` | Locate by type |
+| `find --action=<a>` | Locate by supported action |
+| `find ... --json` | Machine-readable |
+| `find ... --all` | Include hidden elements |
+| `links` | Every href, page order |
+| `links --contain=<s>` | Filter hrefs by substring |
+| `detect` | Which UI framework (Element Plus / AntD / MUI) |
+| `diff` | Compare current page against last snapshot |
+
+### Act
+| Command | Description |
+|---|---|
+| `click <@ref\|sel>` | Click; verifies whether the page actually changed |
+| `click <x> <y>` | Click coordinates |
+| `fill <@ref\|sel> <val>` | Fill input; reads back DOM value to confirm |
+| `type <text>` | Type into focused element |
+| `select <@ref\|sel> <val>` | Choose native `<select>` option |
+| `check` / `uncheck <@ref\|sel>` | Toggle checkbox / radio |
+| `contenteditable <@ref\|sel> <text>` | Set rich-text content |
+| `upload <@ref\|sel> <file>...` | Attach files to file input |
+| `drag <@ref\|sel> <@ref\|sel>` | Drag element onto element |
+| `drag <@ref\|sel> --to=<x>,<y>` | Drag to coordinates |
+| `drag <@ref\|sel> --by=<dx>,<dy>` | Drag by delta (sliders) |
+| `hover <@ref\|sel>` | Hover |
+| `scroll <x> <y>` | Scroll |
+
+### Navigate / wait
+| Command | Description |
+|---|---|
+| `open <url>` | Navigate |
+| `wait selector <sel>` | Wait for node |
+| `wait text <text>` | Wait for text |
+| `wait url <pattern>` | Wait for URL match |
+| `wait stable` | Wait for DOM to settle |
+| `get <attr>` | Read `title` / `url` / `html` / `text` |
+| `screenshot` | Save JPEG |
+| `tab list` / `tab new` / `tab close <i>` | Tabs |
+
+### Execute / extract
+| Command | Description |
+|---|---|
+| `eval --file <path>` | Run JS from file — **preferred** |
+| `eval --stdin` | Run JS from stdin |
+| `eval <expr>` | Inline (simple expressions only) |
+| `site list` / `site <name> k=v` | Site adapters |
+| `network nav <url> --with-body --json` | Capture requests |
+| `network start` / `requests` / `stop` / `clear` | Manual capture |
+
+### Lifecycle / infra
+| Command | Description |
+|---|---|
+| `launch` / `launch --force` / `launch --headless` | Start Chrome |
+| `close` | Stop Chrome |
+| `status` | Chrome state, PIDs, tabs |
+| `daemon start` / `stop` / `status` | HTTP API on :19824 |
+| `cache list` / `cache clear` | Page map cache |
+| `overlay inject` / `overlay remove` | Numbered overlay |
+| `help` | Full command list |
+
+---
+
+## 6. Worked Example
+
+**Task:** get the first 10 questions from Nowcoder's "SQL 快速入门" list.
+
+```bash
+# 1. Navigate
+auto-browser open "https://www.nowcoder.com/exam/oj?tab=SQL%E7%AF%87"
+
+# 2. Survey — 124 links means it's a listing page
+auto-browser snap --limit=10
+#   Kinds: link=124  button=14  text=8  dropdown=2  icon=1  label=1
+
+# 3. Question links live under /practice/ — harvest them all at once
+auto-browser links --contain=/practice/ --json
+```
+
+That yields titles + URLs in page order. Question number and difficulty live in
+the *parent row*, not the link, so those need one `eval --file` pass (see the
+`scrape.js` example in section 3).
+
+Non-obvious detail worth internalizing: sort by `getBoundingClientRect().top`,
+not by the question number. This list has `SQL40` physically placed inside
+chapter 3, so numeric sorting produces the wrong order. **Visual order is the
+truth; DOM order and ID order are not.**
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `not a valid selector` from `eval` | Shell ate your quotes | Use `eval --file` |
+| `Element not found: @e5` | No snapshot, or page changed | Re-run `snap` or `find` |
+| Empty results, `Page:` blank | You never navigated | `open <url>` first |
+| `find` returns 0 matches | Element hidden, or wrong kind | Add `--all`; check `Kinds:` census |
+| `select` fails on a dropdown | It's `kind=dropdown`, not `select` | `click` to open, `find` option, `click` it |
+| Page looks incomplete | JS still rendering | `wait stable` or `wait text "..."` |
+| `no-observable-change` after click | Click landed but nothing happened | Element may be decorative; try its parent |
+| Custom dropdown ignores clicks | Framework rejects synthetic events | Use `click` (real CDP events), not `eval` + `.click()` |
+| Chrome won't start | Binary not found | Set `AUTO_BROWSER_CHROME` |
+| Port busy | Stale instance | `auto-browser close`, or `--port=9333` |
+
+---
+
+## 8. Rules of Thumb
+
+1. **Never guess an element's type.** `find` tells you the `kind` and the valid `actions`.
+2. **Read `href` from output; don't click to discover URLs.** `links` gets all of them in one call.
+3. **Put non-trivial JS in a file.** Inline JS dies to shell quoting.
+4. **Check the `Kinds:` census first.** It tells you the page's shape before you drill in.
+5. **`@ref` and CSS selector are interchangeable** in every action command.
+6. **Sort extracted lists by `rect.y`.** Visual order ≠ DOM order ≠ ID order.
+7. **`wait` beats sleeping.** `wait stable` / `wait text` / `wait selector`.
+8. **Don't manage Chrome manually.** Commands auto-launch. Use `launch --force` only for a guaranteed-clean slate.
+9. **`click` reports whether the page changed.** `no-observable-change` means your click did nothing — pick a different element rather than repeating.
+10. **Check `site list` before writing a scraper.** An adapter may already exist.
+
+---
+
+## 9. Programmatic API
+
+```javascript
+import { AutoBrowser } from 'auto-browser';
+
+const ab = new AutoBrowser();
+await ab.connect();                    // auto-launches Chrome
+await ab.navigate('https://example.com');
+
+const map = await ab.buildMap({ compress: true });
+// map.kinds    -> { link: 124, button: 14, ... }
+// map.elements -> [{ ref, kind, actions, href, value, options, locator, rect, ... }]
+
+const fw = await ab.detectFramework();
+await ab.waitForDomStable();
+const changes = await ab.diffMaps(map);
+
+await ab.disconnect();
+```
+
+Query a built map without re-scraping:
+
+```javascript
+import { queryMap } from 'auto-browser/core/map.mjs';
+const links = queryMap(map, { kind: 'link', text: 'SQL' });
+const fillable = queryMap(map, { action: 'fill' });
+```
+
+Lifecycle control:
+
+```javascript
+import { ensureChrome, launchChrome, closeChrome, chromeStatus }
+  from 'auto-browser/core/launcher.mjs';
+
+const ready = await ensureChrome();        // idempotent; returns browserURL
+await launchChrome({ force: true });
+const status = await chromeStatus();
+await closeChrome();
+```
+
+---
+
+## 10. Known Limits
+
+- Cross-origin iframes are skipped (same-origin works, refs look like `@f1-e2`).
+- Closed Shadow DOM is unreachable by design; open Shadow DOM works.
+- Custom dropdowns need open-then-click, not `select`.
+- `diff` rebuilds and compares maps; it is not a live DOM mutation observer.
+- `daemon` and `mcp` do not yet enforce URL allow-lists or confirm high-risk actions.
+- Multi-tab snapshot lifecycles are not fully isolated.

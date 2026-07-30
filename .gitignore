@@ -6,6 +6,7 @@ package-lock.json
 cache/maps/
 cache/scripts/
 cache/index.json
+cache/last-snapshot.json
 
 # Logs
 *.log
@@ -32,3 +33,7 @@ coverage/
 # Debug
 debug.png
 debug.log
+screenshot-*.jpg
+
+# Scratch / throwaway exploration scripts
+__*.mjs

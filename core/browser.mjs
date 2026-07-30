@@ -1,4 +1,5 @@
 import puppeteer from 'puppeteer-core';
+import { ensureChrome } from './launcher.mjs';
 
 const CDP_URL = 'http://127.0.0.1:9222';
 const VIEWPORT = { width: 1920, height: 1080 };
@@ -16,7 +17,10 @@ export async function connect({ url = CDP_URL, hostname, viewport = VIEWPORT } =
     return { browser: _browser, page: pages[0] || await _browser.newPage() };
   }
 
-  _browser = await puppeteer.connect({ browserURL: url });
+  // Guarantee a CDP-enabled Chrome exists before connecting.
+  // This is what makes a single invocation "just work" on any machine.
+  const ready = await ensureChrome({ port: new URL(url).port ? Number(new URL(url).port) : undefined });
+  _browser = await puppeteer.connect({ browserURL: ready.browserURL });
   const pages = await _browser.pages();
 
   let page;
@@ -44,7 +48,7 @@ export async function disconnect() {
 }
 
 export async function navigate(page, url) {
-  await page.goto(url, { waitUntil: 'networkidle0', timeout: 15000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 }
 
 export function sleep(ms) {

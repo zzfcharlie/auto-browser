@@ -1,7 +1,7 @@
 {
   "name": "auto-browser",
-  "version": "2.0.0",
-  "description": "Your browser is the API. CLI + MCP + Daemon for AI agents. Page maps, site adapters, network capture, UI framework detection.",
+  "version": "3.0.0",
+  "description": "Your browser is the API. Self-describing elements: every element reports its kind (link/text/select/slider/...) and the actions it accepts. Auto-launches Chrome. CLI + MCP + Daemon for AI agents.",
   "type": "module",
   "main": "api/index.mjs",
   "bin": {
@@ -17,26 +17,33 @@
     "mcp/",
     "site/",
     "daemon/",
+    "AGENTS.md",
     "SKILL.md"
   ],
   "scripts": {
     "start": "node bin/cli.mjs",
+    "launch": "node bin/cli.mjs launch",
+    "close": "node bin/cli.mjs close",
+    "status": "node bin/cli.mjs status",
     "map": "node bin/cli.mjs map",
     "mcp": "node mcp/server.mjs",
     "daemon": "node bin/cli.mjs daemon start",
-    "site": "node bin/cli.mjs site"
+    "site": "node bin/cli.mjs site",
+    "test": "node tests/smoke.mjs"
   },
   "keywords": [
     "browser-automation",
     "cdp",
     "puppeteer",
     "web-scraping",
+    "ai-agent",
+    "agentic",
     "page-map",
+    "element-detection",
     "mcp",
     "site-adapter",
     "network-capture",
     "daemon",
-    "bb-browser",
     "browser-as-api",
     "element-plus",
     "ant-design",
@@ -46,7 +53,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zhifeng-z/auto-browser.git"
+    "url": "https://github.com/zzfcharlie/auto-browser.git"
+  },
+  "homepage": "https://github.com/zzfcharlie/auto-browser#readme",
+  "bugs": {
+    "url": "https://github.com/zzfcharlie/auto-browser/issues"
   },
   "dependencies": {
     "puppeteer-core": "^25.3.0",
