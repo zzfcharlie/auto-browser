@@ -5,7 +5,17 @@
 [![npm version](https://img.shields.io/npm/v/auto-browser.svg)](https://www.npmjs.com/package/auto-browser)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-## What's new in v3
+## What's new in v4
+
+**Actions report their reaction.** Every action (`click` / `fill` / `type` / `select` / `check` / `hover` / `drag` / `upload`) now watches the page after it fires and tells you what happened — on `[reaction]` lines: toasts, form validation, inline errors, opened dialogs and dimming overlays, JS console/page errors, navigations, and judge/submit **verdicts** (`通过全部用例`, `答案错误`, `SQL_ERROR…`, `Accepted`, `Wrong Answer`, …). An agent reads the outcome instead of re-snapshotting to guess what its click did — see [`AGENTS.md` Step 4](AGENTS.md).
+
+**Async results, handled.** A judge verdict, a submit result, or a search response often renders *seconds* after the click, behind a spinner / `评测中` / `正在为你查询结果` state. The reaction detector keeps observing until a concrete signal appears (verdict / modal / toast / error) or the DOM goes idle — so you get the real outcome, not the loading intermediate. Tunable via `AUTO_BROWSER_RESULT_TIMEOUT` (default 15s) and `AUTO_BROWSER_COOLDOWN`.
+
+**Blocking walls are flagged, not looped.** When a login window, modal, or overlay covers the page, the action prints `[action-required]` and exits with code **10**, so a driving agent knows a human is needed rather than retrying into a dead end. `AUTO_BROWSER_INTERACTIVE=1` pauses for a human to resolve it, then continues.
+
+**With `--json`,** the reaction is structured: `{ result, reaction, actionRequired }`.
+
+### Previously, in v3
 
 **Self-describing elements.** Every element now reports its semantic `kind` (link, text, select, dropdown, checkbox, radio, toggle, slider, file, tab, contenteditable, draggable, ...) and the exact `actions` it accepts. An agent no longer guesses whether something is a button or a dropdown — see [the core idea](#the-core-idea-self-describing-elements).
 
