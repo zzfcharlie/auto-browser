@@ -1,7 +1,7 @@
 {
   "name": "auto-browser",
-  "version": "3.0.0",
-  "description": "Your browser is the API. Self-describing elements: every element reports its kind (link/text/select/slider/...) and the actions it accepts. Auto-launches Chrome. CLI + MCP + Daemon for AI agents.",
+  "version": "4.0.0",
+  "description": "Your browser is the API. Self-describing elements: every element reports its kind (link/text/select/slider/...) and the actions it accepts. Actions report their reaction (toasts, validation, dialogs, judge/submit verdicts) and flag blocking login/modal walls. Auto-launches Chrome. CLI + MCP + Daemon for AI agents.",
   "type": "module",
   "main": "api/index.mjs",
   "bin": {

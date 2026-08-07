@@ -180,7 +180,8 @@ export async function ensureChrome(options = {}) {
     '--restore-last-session',
     'about:blank'
   ];
-  if (options.headless) args.unshift('--headless=new');
+  const headless = options.headless ?? (process.env.AUTO_BROWSER_HEADLESS === '1');
+  if (headless) args.unshift('--headless=new');
 
   const child = spawn(binary, args, {
     detached: true,

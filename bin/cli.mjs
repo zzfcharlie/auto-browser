@@ -258,18 +258,85 @@ let _ab = null;
 let _lastElements = loadSnapshot(); // cache of last snap/map elements for @ref click
 let _overlayActive = false; // persistent overlay state
 
+// ============================================================
+// Liveness: watchdog + heartbeat.
+// A one-shot CLI command must never hang forever. Puppeteer's CDP WebSocket
+// keeps the event loop alive, so an unbounded await (a selector that never
+// appears, networkidle on a long-polling SPA) would freeze this process — and
+// freeze whatever is waiting on it (opencode, a shell, CI).
+//   - watchdog : hard deadline; force-exits with code 124 if exceeded.
+//   - heartbeat: every 2s prints elapsed time + current phase to STDERR, so
+//     silence becomes observable — a phase that stops advancing past the
+//     deadline is a hang; a phase that keeps changing is real progress.
+// Both timers are unref()'d: they never keep the process alive on their own,
+// they only act when we are genuinely stuck. STDERR keeps --json stdout clean.
+// Env: AUTO_BROWSER_TIMEOUT=<secs> (0 disables), AUTO_BROWSER_TRACE=1 (phase log).
+// ============================================================
+const _startedAt = Date.now();
+let _phase = 'startup';
+let _phaseAt = _startedAt;
+let _watchdog = null;
+let _heartbeat = null;
+
+function setPhase(name) {
+  _phase = name;
+  _phaseAt = Date.now();
+  if (process.env.AUTO_BROWSER_TRACE === '1') {
+    const t = ((Date.now() - _startedAt) / 1000).toFixed(1);
+    process.stderr.write(`[t+${t}s] ${name}\n`);
+  }
+}
+
+function startLiveness(cmd, args) {
+  // Commands that are long-running by design must be exempt from the deadline.
+  const persistent = cmd === 'daemon'
+    || (cmd === 'network' && ['start', 'requests', 'watch', 'stop', 'clear'].includes(args[0]));
+  if (persistent) return;
+
+  const secs = process.env.AUTO_BROWSER_TIMEOUT !== undefined
+    ? Number(process.env.AUTO_BROWSER_TIMEOUT)
+    : 90;
+  if (secs > 0) {
+    _watchdog = setTimeout(() => {
+      const inPhase = ((Date.now() - _phaseAt) / 1000).toFixed(1);
+      console.error(`\n[watchdog] '${cmd}' exceeded ${secs}s — stuck in phase "${_phase}" for ${inPhase}s. Forcing exit; this is a hang, not slow work.`);
+      process.exit(124);
+    }, secs * 1000);
+    _watchdog.unref();
+  }
+
+  let ticks = 0;
+  _heartbeat = setInterval(() => {
+    // Stay silent for the first ~4s so quick commands print nothing.
+    if (++ticks < 2) return;
+    const total = ((Date.now() - _startedAt) / 1000).toFixed(0);
+    const inPhase = ((Date.now() - _phaseAt) / 1000).toFixed(0);
+    process.stderr.write(`[watch] ${total}s elapsed — phase "${_phase}" (${inPhase}s)\n`);
+  }, 2000);
+  _heartbeat.unref();
+}
+
+function stopLiveness() {
+  if (_watchdog) { clearTimeout(_watchdog); _watchdog = null; }
+  if (_heartbeat) { clearInterval(_heartbeat); _heartbeat = null; }
+}
+
 
 async function getAB() {
   if (!_ab) {
+    setPhase('connect-chrome');
     _ab = new AutoBrowser();
     await _ab.connect();
+    setPhase('connected');
   }
   return _ab;
 }
 
 async function getPage() {
   const ab = await getAB();
-  return ab.getPage();
+  const page = ab.getPage();
+  attachReactionListeners(page); // idempotent: buffer dialogs/console/pageerror for reaction reports
+  return page;
 }
 
 async function cleanup() {
@@ -283,36 +350,424 @@ async function cleanup() {
   }
 }
 
-async function pageState(page) {
-  return page.evaluate(() => ({
+// ============================================================
+// Post-action reaction detection ("cooldown recognition").
+//
+// After every click/fill/select/etc. the page may respond in wildly different
+// ways — a validation message, a toast, a native dialog, an inline error, a
+// console/JS error, or a navigation — and there is no universal signal. So we
+// take a short "cool-down" window after each action and report, in the agent's
+// own output, what the page actually did. This stops the agent from blindly
+// clicking on and surfaces "what happened / what support is needed".
+//
+// Two channels are combined:
+//   1. Passive events buffered by listeners attached once per session
+//      (native dialogs, console errors, uncaught page errors).
+//   2. A before/after DOM diff of visible feedback surfaces
+//      (role=alert / aria-live, framework toasts, form validation, error text).
+// ============================================================
+
+// --- passive event buffer (attached once in getPage) ---
+let _reactionEvents = { dialogs: [], consoleErrors: [], pageErrors: [] };
+let _reactionAttached = false;
+
+function resetReactionEvents() {
+  _reactionEvents = { dialogs: [], consoleErrors: [], pageErrors: [] };
+}
+
+function attachReactionListeners(page) {
+  if (_reactionAttached) return;
+  _reactionAttached = true;
+  // A registered 'dialog' listener means WE own the dialog: it will block the
+  // page until handled. Record it, then dismiss so the command can't hang.
+  page.on('dialog', async d => {
+    _reactionEvents.dialogs.push({ type: d.type(), message: d.message() });
+    try { await d.dismiss(); } catch { /* already handled */ }
+  });
+  page.on('console', msg => {
+    if (msg.type() === 'error') _reactionEvents.consoleErrors.push(String(msg.text()).slice(0, 300));
+  });
+  page.on('pageerror', err => {
+    _reactionEvents.pageErrors.push(String(err?.message || err).slice(0, 300));
+  });
+}
+
+// Runs INSIDE the page. Gathers every visible feedback surface we know about.
+function collectSignalsInPage() {
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+  const visible = el => {
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const s = getComputedStyle(el);
+    return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0;
+  };
+  const texts = sel => {
+    const out = [];
+    document.querySelectorAll(sel).forEach(e => {
+      if (!visible(e)) return;
+      const t = norm(e.innerText || e.textContent);
+      if (t) out.push(t.slice(0, 200));
+    });
+    return [...new Set(out)];
+  };
+
+  const alerts = texts('[role="alert"], [aria-live="assertive"], [aria-live="polite"], output[role="status"]');
+  const toasts = texts([
+    '.el-message', '.el-notification', '.ant-message-notice', '.ant-notification-notice',
+    '.Toastify__toast', '.toast', '.toastify', '.MuiAlert-message', '.MuiSnackbar-root',
+    '.v-snackbar__content', '.chakra-toast', '.notyf__toast', '.n-message', '[role="status"]'
+  ].join(','));
+  const errText = texts([
+    '.error', '.is-error', '.has-error', '.field-error', '.invalid-feedback',
+    '.el-form-item__error', '.ant-form-item-explain-error', '.form-error',
+    '.text-danger', '.help-block.error', '.form-item-error', '.error-message'
+  ].join(','));
+
+  const validation = [];
+  document.querySelectorAll('input, textarea, select').forEach(f => {
+    try {
+      if (f.willValidate && !f.validity.valid && f.validationMessage) {
+        validation.push({
+          field: norm(f.name || f.id || f.getAttribute('aria-label') || f.placeholder || f.tagName),
+          message: norm(f.validationMessage).slice(0, 200)
+        });
+      }
+    } catch { /* some inputs throw on .validity */ }
+  });
+
+  // Modal dialogs. Frameworks (Element-UI, AntD, MUI, Bootstrap) usually do NOT
+  // set role=dialog / aria-modal, so match their container classes too. This is
+  // what catches "a login window popped up and dimmed the page".
+  const modalSel = [
+    '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]',
+    '.el-dialog', '.el-dialog__wrapper', '.el-message-box', '.el-drawer__body',
+    '.ant-modal', '.ant-modal-content', '.ant-drawer-content',
+    '.MuiDialog-paper', '.modal.show', '.modal.in', '.v-dialog',
+    '[class*="login-dialog"]', '[class*="Dialog"]', '[class*="-modal"]'
+  ].join(',');
+  const modals = [];
+  document.querySelectorAll(modalSel).forEach(el => {
+    if (!visible(el)) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 120 || r.height < 60) return; // ignore tiny decorative bits
+    const t = norm(el.innerText || el.textContent);
+    if (t) modals.push(t.slice(0, 220));
+  });
+  // A big high-z fixed/absolute layer that dims/blocks the page (modal backdrop).
+  let masked = false;
+  const nodes = document.querySelectorAll('div, section');
+  for (let i = 0; i < nodes.length && !masked; i++) {
+    const el = nodes[i];
+    const s = getComputedStyle(el);
+    if (s.position !== 'fixed' && s.position !== 'absolute') continue;
+    if ((parseInt(s.zIndex) || 0) < 1000) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < innerWidth * 0.6 || r.height < innerHeight * 0.6) continue;
+    const cls = (el.className || '').toString();
+    if (/mask|overlay|modal|backdrop|dimmer|shadow/i.test(cls)) masked = true;
+  }
+
+  // Is an async operation still in flight? Detect this from a genuine BLOCKING
+  // loader overlay or an explicit status TEXT ("评测中" / "正在为你查询结果").
+  // Deliberately NOT keyed on generic [class*="loading"]/[class*="spinner"]:
+  // rich editors (Monaco's "tokenize-loading") and decorative spinners are
+  // ALWAYS present, which would make every page look perpetually busy and
+  // disable the async-result wait.
+  let pending = false;
+  const PENDING_RE = /评测中|判题中|运行中|提交中|评测排队|排队中|加载中|评测进行中|判定中|正在为你查询结果|正在查询|查询结果中|结果生成中|正在评测|正在提交|Judging|Running\b|Pending|Evaluating|Submitting/i;
+  const mask = document.querySelector('.el-loading-mask, .default-loading, [class*="submitting"], [class*="evaluating"], [class*="judging"]');
+  if (mask && visible(mask)) pending = true;
+  if (!pending) {
+    const pnodes = document.querySelectorAll('span, div, button, p, i, b, [class*="btn"], .el-loading-text');
+    for (let i = 0; i < pnodes.length && !pending; i++) {
+      const e = pnodes[i];
+      if (e.children.length > 1) continue; // leaf-ish only, avoid big containers
+      const t = norm(e.innerText || e.textContent);
+      if (t && t.length <= 20 && PENDING_RE.test(t) && visible(e)) pending = true;
+    }
+  }
+
+  // A rendered pass/fail verdict (judge result, submit outcome). Scoped to
+  // result/console/status panels + strong, unambiguous verdict phrases so it
+  // can't match "通过率" in a problem description or the static "提示未通过的
+  // 测试用例" debug hint. Pick the most specific (shortest) matching element.
+  let verdict = null;
+  const VERDICT_RE = /通过全部用例|答案错误|运行错误|运行时错误|编译错误|运行超时|时间超限|内存超限|格式错误|SQL_ERROR|案例通过率|Wrong Answer|Accepted|Runtime Error|Compile Error|Time Limit|Presentation Error|Memory Limit/;
+  const vnodes = document.querySelectorAll('[class*="result"],[class*="Result"],[class*="judge"],[class*="Judge"],[class*="console"],[class*="Console"],[class*="output"],[class*="Output"],[class*="status"],.el-message,.el-message-box__message');
+  for (let i = 0; i < vnodes.length; i++) {
+    const e = vnodes[i];
+    if (!visible(e)) continue;
+    const t = norm(e.innerText || e.textContent);
+    if (t && t.length < 240 && VERDICT_RE.test(t) && (!verdict || t.length < verdict.length)) verdict = t.slice(0, 240);
+  }
+
+  return {
     url: location.href,
     title: document.title,
     textLength: document.body?.innerText?.length || 0,
     domLength: document.documentElement?.outerHTML?.length || 0,
-    dialogs: document.querySelectorAll('[role="dialog"], [aria-modal="true"]').length
-  }));
+    dialogs: document.querySelectorAll('[role="dialog"], [aria-modal="true"]').length,
+    alerts, toasts, errText, validation,
+    modals: [...new Set(modals)], masked, pending, verdict
+  };
 }
 
-async function waitForActionState(page, before, timeout = 1500) {
+const _emptySignals = () => ({ url: '', title: '', textLength: 0, domLength: 0, dialogs: 0, alerts: [], toasts: [], errText: [], validation: [], modals: [], masked: false, pending: false, verdict: null });
+
+async function captureSignals(page) {
+  const withTimeout = p => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('signal-timeout')), 2500))
+  ]);
+  try {
+    return await withTimeout(page.evaluate(collectSignalsInPage));
+  } catch {
+    // Context destroyed mid-navigation, or the main thread was briefly busy — retry once.
+    await new Promise(r => setTimeout(r, 200));
+    try { return await withTimeout(page.evaluate(collectSignalsInPage)); }
+    catch { return { ..._emptySignals(), url: (() => { try { return page.url(); } catch { return ''; } })() }; }
+  }
+}
+
+const _diffText = (before, after) => after.filter(x => !before.includes(x));
+const _diffVal = (before, after) => {
+  const key = v => `${v.field}\u0000${v.message}`;
+  const seen = new Set(before.map(key));
+  return after.filter(v => !seen.has(key(v)));
+};
+
+// Observe the page for up to cooldownMs after an action, then diff against the
+// pre-action snapshot. Returns a structured reaction report.
+async function observeReaction(page, before, opts = {}) {
+  const cooldownMs = opts.cooldownMs
+    || (process.env.AUTO_BROWSER_COOLDOWN !== undefined ? Number(process.env.AUTO_BROWSER_COOLDOWN) : 1200);
+  setPhase('observe-reaction');
   const started = Date.now();
-  let current = await pageState(page);
-  while (Date.now() - started < timeout) {
-    if (current.url !== before.url || current.title !== before.title ||
-        current.textLength !== before.textLength || current.domLength !== before.domLength ||
-        current.dialogs !== before.dialogs) {
-      return { changed: true, state: current };
+  let after = await captureSignals(page);
+  let stable = 0;
+  let lastDom = after.domLength;
+
+  while (Date.now() - started < cooldownMs) {
+    const explicit =
+      _diffText(before.alerts, after.alerts).length ||
+      _diffText(before.toasts, after.toasts).length ||
+      _diffText(before.errText, after.errText).length ||
+      _diffText(before.modals, after.modals).length ||
+      _diffVal(before.validation, after.validation).length ||
+      (after.masked && !before.masked) ||
+      after.dialogs > before.dialogs ||
+      _reactionEvents.dialogs.length ||
+      _reactionEvents.pageErrors.length;
+    if (explicit) {
+      // Give the widget one more beat to finish rendering its text.
+      await new Promise(r => setTimeout(r, 150));
+      after = await captureSignals(page);
+      break;
     }
-    await new Promise(resolve => setTimeout(resolve, 100));
-    current = await pageState(page);
+    await new Promise(r => setTimeout(r, 120));
+    const next = await captureSignals(page);
+    if (next.domLength === lastDom) stable++; else { stable = 0; lastDom = next.domLength; }
+    after = next;
+    const changedVsBefore = after.url !== before.url || after.domLength !== before.domLength || after.title !== before.title;
+    if (stable >= 2 && changedVsBefore) break; // settled after a real change
+    if (stable >= 3) break;                    // settled, nothing happened
   }
-  return { changed: false, state: current };
+
+  // ── Smart wait / async convergence ──────────────────────────────────────────
+  // Many real outcomes (a judge verdict, a submit result, a search response)
+  // render SECONDS after the click, long past the normal cooldown. Relying on a
+  // transient "评测中"/spinner flag is fragile — the moment we sample can fall in
+  // a gap. Instead: once an action has CHANGED the page (but not navigated) and
+  // hasn't already surfaced a signal, keep observing until a concrete signal
+  // appears (verdict / modal / overlay / toast / error / dialog), OR the DOM has
+  // been stable-and-idle for a beat, OR we hit the result-timeout cap. This
+  // reliably bridges the async gap without depending on catching the spinner.
+  const resultTimeout = opts.resultTimeoutMs
+    || (process.env.AUTO_BROWSER_RESULT_TIMEOUT !== undefined ? Number(process.env.AUTO_BROWSER_RESULT_TIMEOUT) : 15000);
+  const navigatedEarly = Boolean(after.url && before.url && after.url !== before.url);
+  const changedNow = after.url !== before.url || after.domLength !== before.domLength ||
+    after.title !== before.title || after.textLength !== before.textLength;
+  const signalNow = s =>
+    _diffText(before.alerts, s.alerts).length || _diffText(before.toasts, s.toasts).length ||
+    _diffText(before.errText, s.errText).length || _diffText(before.modals, s.modals).length ||
+    _diffVal(before.validation, s.validation).length || (s.masked && !before.masked) ||
+    (s.verdict && s.verdict !== before.verdict) || s.dialogs > before.dialogs;
+  let startedPending = Boolean(after.pending && !before.pending);
+  if (resultTimeout > 0 && !navigatedEarly && changedNow && !signalNow(after) && !_reactionEvents.dialogs.length) {
+    setPhase('await-result');
+    const deadline = Date.now() + resultTimeout;
+    let stableR = 0, lastR = after.domLength;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 250));
+      const next = await captureSignals(page);
+      after = next;
+      if (next.pending) startedPending = true;
+      if (signalNow(next) || _reactionEvents.dialogs.length) {
+        await new Promise(r => setTimeout(r, 300)); // let the result text settle
+        after = await captureSignals(page);
+        break;
+      }
+      if (next.domLength === lastR) stableR++; else { stableR = 0; lastR = next.domLength; }
+      if (!next.pending && stableR >= 3) break; // settled (~750ms idle), nothing async surfaced
+    }
+    setPhase('observe-reaction');
+  }
+
+  const dialogs = _reactionEvents.dialogs.slice();
+  const consoleErrors = _reactionEvents.consoleErrors.slice();
+  const pageErrors = _reactionEvents.pageErrors.slice();
+  const alerts = _diffText(before.alerts, after.alerts);
+  const toasts = _diffText(before.toasts, after.toasts);
+  const errors = _diffText(before.errText, after.errText);
+  const modals = _diffText(before.modals, after.modals);
+  const masked = Boolean(after.masked && !before.masked);
+  const validation = _diffVal(before.validation, after.validation);
+  const verdict = (after.verdict && after.verdict !== before.verdict) ? after.verdict : null;
+  // Only "still running" if we timed out with NOTHING to show. If a verdict,
+  // modal, or overlay already surfaced, the operation effectively resolved even
+  // if a residual spinner/status element lingers.
+  const pendingUnresolved = Boolean(after.pending && startedPending && !verdict && !modals.length && !masked);
+  const navigated = after.url && before.url && after.url !== before.url;
+  const changed = navigated || after.title !== before.title ||
+    after.textLength !== before.textLength || after.domLength !== before.domLength ||
+    after.dialogs !== before.dialogs;
+  const hasSignal = Boolean(
+    dialogs.length || consoleErrors.length || pageErrors.length ||
+    alerts.length || toasts.length || errors.length || validation.length ||
+    modals.length || masked || verdict
+  );
+  // A modal/overlay that is present RIGHT NOW (even if it was already there
+  // before this action) means the page is blocked and clicks miss their target.
+  const blockedNow = Boolean(after.masked || after.modals.length);
+
+  return { changed, navigated, url: after.url, dialogs, alerts, toasts, errors, validation, modals, masked, verdict, pendingUnresolved, blockedNow, currentModals: after.modals, consoleErrors, pageErrors, hasSignal };
 }
 
-function formatActionState(result) {
-  if (result.changed) {
-    return `result=changed url=${result.state.url}`;
+// Collapse duplicates into "text (xN)".
+function _tally(list) {
+  const counts = new Map();
+  for (const t of list) counts.set(t, (counts.get(t) || 0) + 1);
+  return [...counts].map(([t, n]) => (n > 1 ? `${t} (x${n})` : t));
+}
+
+const _looksLikeLogin = t => /登录|注册|登陆|验证码|扫码|sign\s?in|log\s?in|sign\s?up|authenticate/i.test(t);
+
+function printReaction(r) {
+  if (r.verdict) console.log(`[reaction] result: "${r.verdict}"`);
+  for (const d of r.dialogs) console.log(`[reaction] dialog(${d.type}): "${d.message}" (auto-dismissed)`);
+  for (const a of r.alerts) console.log(`[reaction] alert: "${a}"`);
+  for (const v of r.validation) console.log(`[reaction] validation: ${v.field} -> "${v.message}"`);
+  for (const e of r.errors) console.log(`[reaction] error: "${e}"`);
+  for (const t of r.toasts) console.log(`[reaction] toast: "${t}"`);
+  for (const m of r.modals) {
+    const short = m.length > 100 ? m.slice(0, 100) + '…' : m;
+    if (_looksLikeLogin(m)) {
+      console.log(`[reaction] modal(login): a login/sign-up window appeared — NEEDS USER SUPPORT: log in first. text="${short}"`);
+    } else {
+      console.log(`[reaction] modal: a dialog opened — "${short}"`);
+    }
   }
-  return 'result=no-observable-change';
+  if (r.masked && !r.modals.length) {
+    console.log('[reaction] overlay: a modal/overlay dimmed and blocked the page (interaction likely blocked until it is dismissed)');
+  }
+  for (const c of _tally(r.consoleErrors)) console.log(`[reaction] console-error: ${c}`);
+  for (const p of _tally(r.pageErrors)) console.log(`[reaction] page-error: ${p}`);
+  if (r.pendingUnresolved) console.log('[reaction] still running: an async operation did not finish within the result window (raise AUTO_BROWSER_RESULT_TIMEOUT to wait longer)');
+  if (r.navigated) console.log(`[reaction] navigated -> ${r.url}`);
+  if (!r.hasSignal && !r.navigated) {
+    if (r.blockedNow) {
+      const m = r.currentModals[0] || '';
+      const short = m.length > 100 ? m.slice(0, 100) + '…' : m;
+      console.log(_looksLikeLogin(m)
+        ? `[reaction] blocked: a login dialog is currently open and covering the page — NEEDS USER SUPPORT: log in first. Your action likely hit the overlay, not the target. text="${short}"`
+        : '[reaction] blocked: a modal/overlay is currently covering the page — your action likely hit the overlay, not the intended target.');
+    } else {
+      console.log(r.changed
+        ? '[reaction] page changed, but no explicit error/toast/dialog/validation was shown'
+        : '[reaction] none — page showed no error, toast, dialog, or validation feedback');
+    }
+  }
+}
+
+// ============================================================
+// "Action required" — surface blocking situations to the human IMMEDIATELY
+// instead of silently waiting/retrying. When the page throws up a login/modal
+// wall, we stop, tell the user exactly what is needed, and (in an interactive
+// terminal) let them resolve it before continuing. A dedicated exit code lets
+// an agent driving the CLI know "a human is needed" rather than "keep waiting".
+// ============================================================
+const EXIT_ACTION_REQUIRED = 10;
+
+// Given a settled reaction (or a raw signals snapshot), decide whether the page
+// now needs the human. Returns { reason, message } or null.
+function actionRequiredReason(r) {
+  const loginText = (r.modals || []).find(_looksLikeLogin)
+    || ((r.blockedNow || r.masked) && _looksLikeLogin((r.currentModals || r.modals || [])[0] || ''));
+  if (loginText) {
+    return { reason: 'login', message: 'A login / sign-up window is blocking the page. Please log in in the Chrome window, then re-run the command.' };
+  }
+  const confirmDlg = (r.dialogs || []).find(d => d.type === 'confirm' || d.type === 'prompt' || d.type === 'beforeunload');
+  if (confirmDlg) {
+    return { reason: 'dialog', message: `A "${confirmDlg.type}" dialog appeared and was auto-dismissed (treated as cancel). If it needed to be accepted, tell me so I can handle it.` };
+  }
+  if ((r.modals || []).length) {
+    return { reason: 'modal', message: 'A modal dialog opened and may block further actions. Handle it in the browser if needed, then re-run.' };
+  }
+  if (r.blockedNow || r.masked) {
+    return { reason: 'overlay', message: 'A modal/overlay is currently covering the page; your action likely did not reach its target.' };
+  }
+  return null;
+}
+
+// Interactive resolve is STRICTLY OPT-IN (AUTO_BROWSER_INTERACTIVE=1 + a real
+// TTY). By default we never block on stdin — an agent driving the CLI can't type,
+// so blocking would just hang. Default behavior is: print [action-required],
+// set the exit code, and return immediately so the caller can involve the human.
+async function promptUserToResolve(page, req) {
+  if (process.env.AUTO_BROWSER_INTERACTIVE !== '1' || !process.stdin.isTTY) return false;
+  stopLiveness(); // human explicitly asked to wait here; don't let the watchdog fire
+  process.stderr.write(`\n>>> ${req.message}\n>>> Resolve it in the browser, then press Enter to continue (Ctrl+C to abort)... `);
+  await new Promise(resolve => {
+    process.stdin.resume();
+    process.stdin.once('data', () => { process.stdin.pause(); resolve(); });
+  });
+  const after = await captureSignals(page);
+  const stillBlocked = Boolean(after.masked || after.modals.length);
+  console.log(stillBlocked
+    ? '[action-required] still blocked — the dialog is still present.'
+    : '[resolved] the blocking dialog is gone; continuing.');
+  return !stillBlocked;
+}
+
+// Print the immediate action-required notice and set the exit code. Optionally
+// offer the interactive resolve loop. Returns the reason (or null).
+async function flagActionRequired(page, r, { interactive = true } = {}) {
+  const req = actionRequiredReason(r);
+  if (!req) return null;
+  console.log(`\n[action-required] (${req.reason}) ${req.message}`);
+  process.exitCode = EXIT_ACTION_REQUIRED;
+  if (interactive) {
+    const resolved = await promptUserToResolve(page, req);
+    if (resolved) process.exitCode = 0;
+  }
+  return req;
+}
+
+// Shared post-action reporter: prints the action line + the settled reaction.
+// Every action command routes through here so coverage is uniform.
+async function reportAction(page, before, actionLine) {
+  const json = args.includes('--json');
+  const reaction = await observeReaction(page, before);
+  if (json) {
+    const req = actionRequiredReason(reaction);
+    if (req) process.exitCode = EXIT_ACTION_REQUIRED;
+    console.log(JSON.stringify({ result: actionLine, reaction, actionRequired: req || null }, null, 2));
+    return reaction;
+  }
+  console.log(actionLine + (reaction.changed ? ' (result=changed)' : ' (result=no-observable-change)'));
+  printReaction(reaction);
+  await flagActionRequired(page, reaction);
+  return reaction;
 }
 
 // ============================================================
@@ -767,9 +1222,24 @@ async function main() {
       if (!url) { console.error('Usage: auto-browser open <url>'); process.exit(1); }
       const ab = await getAB();
       await ab.navigate(url);
-      const title = await ab.getPage().title();
+      const page = ab.getPage();
+      attachReactionListeners(page);
+      const title = await page.title();
       console.log(`Opened: ${url}`);
       console.log(`Title: ${title}`);
+      // Sites often throw up a login wall right after load. Detect it now and
+      // tell the user immediately instead of letting later commands wait on a
+      // page that is already blocked.
+      const signals = await captureSignals(page);
+      if (args.includes('--json')) {
+        const req = actionRequiredReason(signals);
+        if (req) { process.exitCode = EXIT_ACTION_REQUIRED; console.log(JSON.stringify({ actionRequired: req }, null, 2)); }
+      } else if (signals.masked || signals.modals.length) {
+        const m = signals.modals[0] || '';
+        const short = m.length > 100 ? m.slice(0, 100) + '…' : m;
+        if (m) console.log(`[reaction] ${_looksLikeLogin(m) ? 'modal(login)' : 'modal'}: "${short}"`);
+        await flagActionRequired(page, signals);
+      }
       break;
     }
 
@@ -981,7 +1451,8 @@ async function main() {
       }
       await src.handle.dispose();
 
-      const before = await pageState(page);
+      const before = await captureSignals(page);
+      resetReactionEvents();
       // Move in steps: HTML5 drag & drop and slider widgets both need
       // intermediate mousemove events, not a single jump.
       await page.mouse.move(Math.round(start.x), Math.round(start.y));
@@ -995,8 +1466,7 @@ async function main() {
         await new Promise(r => setTimeout(r, 12));
       }
       await page.mouse.up();
-      const result = await waitForActionState(page, before);
-      console.log(`Dragged ${src.label} -> ${destLabel} (${formatActionState(result)})`);
+      await reportAction(page, before, `Dragged ${src.label} -> ${destLabel}`);
       break;
     }
 
@@ -1023,9 +1493,11 @@ async function main() {
         await handle.dispose();
         process.exit(1);
       }
+      const before = await captureSignals(page);
+      resetReactionEvents();
       await handle.uploadFile(...files.map(f => path.resolve(f)));
       await handle.dispose();
-      console.log(`Uploaded ${files.length} file(s) to ${label}: ${files.join(', ')}`);
+      await reportAction(page, before, `Uploaded ${files.length} file(s) to ${label}: ${files.join(', ')}`);
       break;
     }
 
@@ -1143,7 +1615,8 @@ async function main() {
         if (resolved.confidence < 80) {
           console.warn(`Warning: ${args[0]} matched with confidence ${resolved.confidence} via ${resolved.method}`);
         }
-        const before = await pageState(page);
+        const before = await captureSignals(page);
+        resetReactionEvents();
         const box = await resolved.handle.boundingBox();
         if (box) {
           await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
@@ -1151,10 +1624,8 @@ async function main() {
           await resolved.handle.click();
         }
         await resolved.handle.dispose();
-        const result = await waitForActionState(page, before);
         const el = resolved.element;
-        console.log(`Clicked @${el.ref}: <${el.tag}> "${String(el.text || '').slice(0, 40)}" (re-located, ${formatActionState(result)})`);
-        await new Promise(r => setTimeout(r, 500));
+        await reportAction(page, before, `Clicked @${el.ref}: <${el.tag}> "${String(el.text || '').slice(0, 40)}" (re-located)`);
         break;
       }
 
@@ -1162,16 +1633,26 @@ async function main() {
       if (args[0]?.startsWith('.') || args[0]?.startsWith('#')) {
         const el = await page.$(args[0]);
         if (!el) { console.error(`Element not found: ${args[0]}`); process.exit(1); }
-        const before = await pageState(page);
-        await el.click();
-        const result = await waitForActionState(page, before);
+        const before = await captureSignals(page);
+        resetReactionEvents();
+        // Use a raw mouse click at the element's box center (like the @ref path)
+        // instead of puppeteer's awaited el.click(), which can hang when the
+        // element is covered by an overlay/modal.
+        const box = await el.boundingBox();
+        if (box) {
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        } else {
+          await el.click();
+        }
         await el.dispose();
-        console.log(`Clicked: ${args[0]} (${formatActionState(result)})`);
+        await reportAction(page, before, `Clicked: ${args[0]}`);
       } else if (args[0] && args[1]) {
         const x = parseInt(args[0]), y = parseInt(args[1]);
         if (isNaN(x) || isNaN(y)) { console.error('Click: provide x y coordinates'); process.exit(1); }
+        const before = await captureSignals(page);
+        resetReactionEvents();
         await page.mouse.click(x, y);
-        console.log(`Clicked at (${x}, ${y})`);
+        await reportAction(page, before, `Clicked at (${x}, ${y})`);
       } else {
         console.error('Usage: auto-browser click <@N | x y | selector>');
         process.exit(1);
@@ -1218,6 +1699,8 @@ async function main() {
         console.error(`Element is not fillable: ${selector}`);
         process.exit(1);
       }
+      const before = await captureSignals(page);
+      resetReactionEvents();
       await handle.evaluate(node => node.focus());
       await page.keyboard.down('Control');
       await page.keyboard.press('A');
@@ -1230,7 +1713,7 @@ async function main() {
         console.error(`Fill verification failed for ${selector}: expected ${JSON.stringify(value)}, got ${JSON.stringify(actualValue)}`);
         process.exit(1);
       }
-      console.log(`Filled "${label}" with "${value}" (verified)`);
+      await reportAction(page, before, `Filled "${label}" with "${value}" (verified)`);
       break;
     }
 
@@ -1307,9 +1790,11 @@ async function main() {
         console.error(`Element is not hoverable: ${target}`);
         process.exit(1);
       }
+      const before = await captureSignals(page);
+      resetReactionEvents();
       await handle.hover();
       await handle.dispose();
-      console.log(`Hovered "${label}"`);
+      await reportAction(page, before, `Hovered "${label}"`);
       break;
     }
 
@@ -1324,6 +1809,8 @@ async function main() {
       }
       const page = await getPage();
       const { handle, label } = await resolveTarget(page, target);
+      const before = await captureSignals(page);
+      resetReactionEvents();
       const ok = await handle.evaluate((el, wanted) => {
         if (el.tagName !== 'SELECT') return { error: `not a <select> (got <${el.tagName}>)` };
         const option = [...el.options].find(
@@ -1343,7 +1830,7 @@ async function main() {
         if (ok.available) console.error(`Available: ${ok.available.join(' | ')}`);
         process.exit(1);
       }
-      console.log(`Selected "${ok.label}" (value=${ok.value}) in ${label}`);
+      await reportAction(page, before, `Selected "${ok.label}" (value=${ok.value}) in ${label}`);
       break;
     }
 
@@ -1356,6 +1843,8 @@ async function main() {
       }
       const page = await getPage();
       const { handle, label } = await resolveTarget(page, target);
+      const before = await captureSignals(page);
+      resetReactionEvents();
       const res = await handle.evaluate((el, wanted) => {
         const isNative = ['checkbox', 'radio'].includes(el.type);
         const box = isNative ? el : el.querySelector('input[type=checkbox],input[type=radio]');
@@ -1368,7 +1857,7 @@ async function main() {
         console.error(`${cmd} ${label}: ${res.error}`);
         process.exit(1);
       }
-      console.log(`${cmd === 'check' ? 'Checked' : 'Unchecked'} ${label} (now checked=${res.checked})`);
+      await reportAction(page, before, `${cmd === 'check' ? 'Checked' : 'Unchecked'} ${label} (now checked=${res.checked})`);
       break;
     }
 
@@ -1380,6 +1869,8 @@ async function main() {
       }
       const page = await getPage();
       const { handle, label } = await resolveTarget(page, target);
+      const before = await captureSignals(page);
+      resetReactionEvents();
       const res = await handle.evaluate((el, text) => {
         if (!el.isContentEditable) return { error: 'element is not contenteditable' };
         el.focus();
@@ -1392,7 +1883,7 @@ async function main() {
         console.error(`contenteditable ${label}: ${res.error}`);
         process.exit(1);
       }
-      console.log(`Filled contenteditable ${label} -> "${res.text}"`);
+      await reportAction(page, before, `Filled contenteditable ${label} -> "${res.text}"`);
       break;
     }
 
@@ -1401,8 +1892,10 @@ async function main() {
       const text = args.join(' ');
       if (!text) { console.error('Usage: auto-browser type <text>'); process.exit(1); }
       const page = await getPage();
+      const before = await captureSignals(page);
+      resetReactionEvents();
       await page.keyboard.type(text, { delay: 10 });
-      console.log(`Typed: ${text}`);
+      await reportAction(page, before, `Typed: ${text}`);
       break;
     }
 
@@ -1541,14 +2034,30 @@ async function main() {
   }
 }
 
+startLiveness(cmd, args);
+setPhase(`command:${cmd || 'help'}`);
 main()
   .catch(e => {
     console.error('Error:', e.message);
     process.exit(1);
   })
   .finally(async () => {
+    stopLiveness();
+    setPhase('cleanup');
     await cleanup();
+    // Optional auto-close: set AUTO_BROWSER_AUTOCLOSE=1 (or pass --close) and the
+    // dedicated Chrome is shut down when the command finishes, so no window is
+    // left open for you to close by hand. Lifecycle/help commands are exempt.
+    const autoClose = process.env.AUTO_BROWSER_AUTOCLOSE === '1' || args.includes('--close');
+    const exemptCmds = ['close', 'status', 'launch', 'help', '--help', undefined];
+    if (autoClose && !exemptCmds.includes(cmd)) {
+      const portArg = args.find(a => a.startsWith('--port='));
+      const port = portArg ? Number(portArg.split('=')[1]) : undefined;
+      try { await closeChrome({ port, quiet: true }); } catch { /* best effort */ }
+    }
     // Puppeteer can retain a CDP transport handle after disconnect().
-    // This process is a one-shot CLI command, so exit once cleanup is done.
-    if (process.exitCode === undefined) process.exit(0);
+    // This process is a one-shot CLI command, so always exit once cleanup is
+    // done — preserving any exit code set earlier (e.g. EXIT_ACTION_REQUIRED),
+    // otherwise the lingering CDP socket would keep the process alive.
+    process.exit(process.exitCode ?? 0);
   });

@@ -111,6 +111,51 @@ auto-browser click "a.question-link"
 XPath, then semantic scoring (role + accessible name + text + position). If
 confidence is low you get a warning rather than a silent wrong click.
 
+### Step 4 — Read the reaction
+
+Every action command (`click`/`fill`/`type`/`select`/`check`/`hover`/`drag`/
+`upload`/`contenteditable`) doesn't just fire and return — it watches the page
+for a moment afterward and reports what happened, on `[reaction]` lines:
+
+```bash
+$ auto-browser click ".submit-btn"
+Clicked: .submit-btn (result=changed)
+[reaction] result: "通过全部用例 运行时间 34ms 占用内存 6556KB"
+[reaction] modal: a dialog opened — "邀请朋友来挑战吧： 分享解题思路 进入下一题"
+
+[action-required] (modal) A modal dialog opened and may block further actions.
+```
+
+What it surfaces:
+
+| Line | Meaning |
+|---|---|
+| `result: "…"` | A judge/submit **verdict** (`通过全部用例`, `答案错误`, `SQL_ERROR…`, `Accepted`, `Wrong Answer`, …) read from the result panel |
+| `toast:` / `alert:` | Transient notifications (Element/AntD/MUI/Toastify…) and ARIA live regions |
+| `validation:` | HTML5 form-validation messages (`field -> "message"`) |
+| `error:` | Inline field/error text (`.el-form-item__error`, `.invalid-feedback`, …) |
+| `dialog(confirm):` | A native `alert/confirm/prompt` fired and was auto-dismissed |
+| `modal:` / `overlay:` | A framework dialog opened / a dimming backdrop is blocking the page |
+| `console-error:` / `page-error:` | JS errors thrown during the reaction window |
+| `navigated -> <url>` | The action caused a navigation |
+| `still running` | An async op didn't finish within the result window |
+
+**Async results are handled.** A judge verdict, a submit result, or a search
+response often renders *seconds* after the click, behind a spinner /
+`评测中` / `正在为你查询结果` state. The reaction detector keeps observing until a
+concrete signal appears (verdict / modal / toast / error) or the DOM goes idle —
+so you get the real outcome, not the "still loading" intermediate. Tune with
+`AUTO_BROWSER_RESULT_TIMEOUT` (max wait, default `15000` ms) and
+`AUTO_BROWSER_COOLDOWN` (base window, default `1200` ms).
+
+**Blocking situations are flagged, not silently retried.** When a login wall,
+modal, or overlay covers the page, the action prints `[action-required]` and
+exits with code **10** (`EXIT_ACTION_REQUIRED`) so a driving agent knows a human
+is needed rather than looping. Set `AUTO_BROWSER_INTERACTIVE=1` (with a real TTY)
+to pause and let a human resolve it, then continue.
+
+With `--json`, the reaction is structured: `{ result, reaction, actionRequired }`.
+
 ---
 
 ## 2. Element Kinds and Actions
@@ -290,7 +335,10 @@ Login state persists in the dedicated profile across runs. First time you need
 an authenticated site, `launch` and log in manually once.
 
 Environment overrides: `AUTO_BROWSER_CHROME` (binary path),
-`AUTO_BROWSER_PROFILE` (profile dir), `AUTO_BROWSER_PORT` (debug port).
+`AUTO_BROWSER_PROFILE` (profile dir), `AUTO_BROWSER_PORT` (debug port),
+`AUTO_BROWSER_HEADLESS=1` (launch headless), `AUTO_BROWSER_COOLDOWN` /
+`AUTO_BROWSER_RESULT_TIMEOUT` (reaction timing, see Step 4),
+`AUTO_BROWSER_INTERACTIVE=1` (pause for a human on `[action-required]`).
 
 ---
 
@@ -331,6 +379,10 @@ Environment overrides: `AUTO_BROWSER_CHROME` (binary path),
 | `drag <@ref\|sel> --by=<dx>,<dy>` | Drag by delta (sliders) |
 | `hover <@ref\|sel>` | Hover |
 | `scroll <x> <y>` | Scroll |
+
+Every action here also prints a `[reaction]` report (toasts, validation, dialogs,
+opened modals, judge/submit `result:` verdicts, navigations) and flags blocking
+login/modal/overlay walls as `[action-required]` (exit code 10). See Step 4.
 
 ### Navigate / wait
 | Command | Description |
@@ -408,6 +460,9 @@ truth; DOM order and ID order are not.**
 | Custom dropdown ignores clicks | Framework rejects synthetic events | Use `click` (real CDP events), not `eval` + `.click()` |
 | Chrome won't start | Binary not found | Set `AUTO_BROWSER_CHROME` |
 | Port busy | Stale instance | `auto-browser close`, or `--port=9333` |
+| Command exits with code `10` | `[action-required]`: login/modal/overlay is blocking | Resolve in the browser (or `AUTO_BROWSER_INTERACTIVE=1`), then re-run |
+| `[reaction] still running` | Async result outran the window | Raise `AUTO_BROWSER_RESULT_TIMEOUT` |
+| Missed a judge/submit verdict | Result rendered very late | Raise `AUTO_BROWSER_RESULT_TIMEOUT`; read the `result:` reaction line |
 
 ---
 
@@ -423,6 +478,7 @@ truth; DOM order and ID order are not.**
 8. **Don't manage Chrome manually.** Commands auto-launch. Use `launch --force` only for a guaranteed-clean slate.
 9. **`click` reports whether the page changed.** `no-observable-change` means your click did nothing — pick a different element rather than repeating.
 10. **Check `site list` before writing a scraper.** An adapter may already exist.
+11. **Read the `[reaction]` lines after every action.** They tell you the result verdict, validation errors, toasts, and opened dialogs — don't re-`snap` to find out what your click did. An `[action-required]` (exit 10) means a human is needed; stop looping.
 
 ---
 

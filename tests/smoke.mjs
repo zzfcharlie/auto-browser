@@ -4,7 +4,7 @@ import { buildMap } from '../core/map.mjs';
 import { selectValue, setChecked, fillContentEditable } from '../core/form.mjs';
 import { waitForSelector, waitForText, waitForUrl, waitForDomStable } from '../core/wait.mjs';
 import { diffMaps } from '../core/diff.mjs';
-import { ensureChrome } from '../core/launcher.mjs';
+import { ensureChrome, closeChrome } from '../core/launcher.mjs';
 
 const ready = await ensureChrome();
 const browser = await puppeteer.connect({ browserURL: ready.browserURL });
@@ -60,4 +60,7 @@ await waitForUrl(page, 'example\\.com');
 assert.equal(await waitForDomStable(page, { timeout: 3000, stableMs: 200 }), true);
 await page.close();
 await browser.disconnect();
+// Clean up: if this run launched Chrome, close it so we don't leave a
+// stray window open. If we reused an already-running instance, leave it.
+if (ready.launched) await closeChrome({ port: ready.port });
 console.log('smoke tests passed');
